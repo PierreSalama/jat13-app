@@ -107,6 +107,18 @@ export const SETTINGS_REGISTRY = {
       default: true,
       description: 'Whether AI answer synthesis is enabled at all.',
     },
+    codexPath: {
+      type: 'string',
+      default: '',
+      description: 'Explicit path to the Codex CLI (published users set it); empty = auto-discover.',
+    },
+    answerConfidenceMin: {
+      type: 'number',
+      default: 0.6,
+      min: 0,
+      max: 1,
+      description: 'Minimum AI answer confidence before auto-filling a screening question (else park).',
+    },
   },
   gmail: {
     query: {

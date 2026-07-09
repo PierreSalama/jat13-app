@@ -190,3 +190,57 @@ export function makeResolver(deps: ResolverDeps): ResolveControl {
     return { kind: 'park', reason: 'unknown' };
   };
 }
+
+// ---- AI-aware resolver: profile → learned → Codex (the local-subscription fallback rung) -----------
+import type { AiService, ScreeningContext, ScreeningControl } from '../ai/index.js';
+
+export interface AiResolverDeps extends ResolverDeps {
+  ai: AiService;
+  aiEnabled?: boolean;
+  answerConfidenceMin?: number; // default 0.6
+  aiContext?: ScreeningContext['context'];
+}
+
+/**
+ * Wraps the sync resolver: only a genuine `unknown` park (never `sensitive`, never a known miss) is
+ * escalated to Codex. The service itself also refuses sensitive keys; we double-guard here. An accepted
+ * answer (>= confidence floor) is persisted with provenance 'ai' so it's ask-once-ever, then shaped to
+ * the control. AI unavailable/unauthorized → the original park (needs_human) is returned unchanged.
+ */
+export function makeAiAwareResolver(deps: AiResolverDeps): ResolveControl {
+  const base = makeResolver(deps);
+  const min = typeof deps.answerConfidenceMin === 'number' ? deps.answerConfidenceMin : 0.6;
+
+  return async (control, page, adapter): Promise<ControlAnswer> => {
+    const first = base(control, page, adapter) as ControlAnswer; // makeResolver is sync
+    if (first.kind !== 'park' || first.reason !== 'unknown') return first;
+    if (deps.aiEnabled === false) return first;
+
+    const key = controlKey(control);
+    if (isSensitiveKey(key)) return first;
+
+    try {
+      const sctrl: ScreeningControl = { label: control.groupPrompt || control.name || '', keyNorm: key };
+      if (control.role) sctrl.fieldType = control.role;
+      const sctx: ScreeningContext = { profile: deps.profile.data };
+      if (deps.aiContext) sctx.context = deps.aiContext;
+
+      const ai = await deps.ai.answerScreeningQuestion(sctrl, sctx);
+      if (ai.refused || ai.value == null || ai.confidence < min) return first;
+
+      const shaped = valueToAnswer(control, ai.value);
+      if (shaped.kind === 'park') return first;
+
+      deps.answers.record(deps.profileId, {
+        kind: 'qa',
+        label: control.groupPrompt || control.name || key,
+        value: ai.value,
+        confidence: ai.confidence,
+        provenance: 'ai',
+      });
+      return shaped;
+    } catch {
+      return first; // AI unavailable / unauthorized → keep the park
+    }
+  };
+}

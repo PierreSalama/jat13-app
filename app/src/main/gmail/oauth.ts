@@ -59,6 +59,29 @@ export function openToken(dal: Dal, accountId: string): GmailTokenSet | undefine
   }
 }
 
+// ---- client credentials (user-supplied Google Cloud desktop-app id/secret) -------------------------
+// These are a CREDENTIAL, so — exactly as v11 sealed `gmail.clientSecret` at rest — they live SEALED in
+// the secrets DAL, NOT in the settings table. Two hard reasons: the settings registry (schema.ts) only
+// registers gmail.query/syncMinutes and its validator THROWS on any unregistered key, and the secrets
+// SECURITY LAW forbids plaintext credentials in settings. makeGmailClientFactory reads them back from
+// exactly these keys, so the consent flow + the v11 migration MUST seal them here (convention lock).
+export const GMAIL_CLIENT_ID_KEY = 'gmail.clientId';
+export const GMAIL_CLIENT_SECRET_KEY = 'gmail.clientSecret';
+
+/** Seal the desktop-app client id + secret so makeGmailClientFactory can build the OAuth2 client. */
+export function sealClientCredentials(dal: Dal, clientId: string, clientSecret: string): void {
+  dal.secrets.seal(GMAIL_CLIENT_ID_KEY, clientId);
+  dal.secrets.seal(GMAIL_CLIENT_SECRET_KEY, clientSecret);
+}
+
+/** Read the sealed client credentials back (empty strings when absent). */
+export function openClientCredentials(dal: Dal): { clientId: string; clientSecret: string } {
+  return {
+    clientId: dal.secrets.open(GMAIL_CLIENT_ID_KEY) ?? '',
+    clientSecret: dal.secrets.open(GMAIL_CLIENT_SECRET_KEY) ?? '',
+  };
+}
+
 export interface TokenHealthInput {
   /** the sealed token set (undefined → never authorized). */
   tokens?: GmailTokenSet | undefined;

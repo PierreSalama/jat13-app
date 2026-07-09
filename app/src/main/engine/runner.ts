@@ -19,7 +19,7 @@ export type ControlAnswer =
   | { kind: 'radio'; byText: string }
   | { kind: 'select'; byText: string }
   | { kind: 'park'; reason: string };
-export type ResolveControl = (control: SnapNode, page: PageDef, adapter: AdapterDoc) => ControlAnswer;
+export type ResolveControl = (control: SnapNode, page: PageDef, adapter: AdapterDoc) => ControlAnswer | Promise<ControlAnswer>;
 
 export interface DriveDeps {
   runs: RunsDal;
@@ -188,7 +188,7 @@ export async function driveRun(runId: string, deps: DriveDeps): Promise<DriveOut
         const pending: string[] = [];
         for (const control of allNodes(snapshot)) {
           if (!isUnsatisfied(control, allNodes(snapshot))) continue;
-          const ans = resolve(control, page, adapter);
+          const ans = await resolve(control, page, adapter);
           if (ans.kind === 'park') {
             pending.push(control.groupPrompt || control.name || 'unknown question');
             continue;

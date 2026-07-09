@@ -2,7 +2,7 @@
 // the loopback server (REST API + /drive ws gateway), starts the run-service, opens the Aurora window.
 // Structural law 3/5: one process owns the DB, the port, and the socket; a second instance must never
 // race it — hence the single-instance lock.
-import { app, BrowserWindow, ipcMain, safeStorage } from 'electron';
+import { app, BrowserWindow, ipcMain, safeStorage, shell } from 'electron';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Database } from 'better-sqlite3';
@@ -15,7 +15,22 @@ import { loadBuiltins, makeRegistry } from './adapters/registry.js';
 import { WsGateway } from './engine/ws-gateway.js';
 import { makeRunService } from './engine/run-service.js';
 import { makeGmailService, makeGmailClientFactory, mountGmailApi } from './gmail/index.js';
+import { mountGmailConnectApi } from './gmail/connect.js';
+import { makeAiService } from './ai/index.js';
+import { makeDiscoveryService } from './discovery/service.js';
 import { IDENTITY } from '@jat13/shared';
+
+/** v11 sealed values are `enc:v1:` + base64(DPAPI); same OS user → v13 safeStorage decrypts them. */
+function unsealV11(stored: string): string {
+  const PREFIX = 'enc:v1:';
+  if (!stored.startsWith(PREFIX)) return stored;
+  if (!safeStorage.isEncryptionAvailable()) return '';
+  try {
+    return safeStorage.decryptString(Buffer.from(stored.slice(PREFIX.length), 'base64'));
+  } catch {
+    return '';
+  }
+}
 
 const HERE = dirname(fileURLToPath(import.meta.url)); // dist/main at runtime
 const DEV = !app.isPackaged || process.env.JAT_DEV === '1';
@@ -54,8 +69,11 @@ async function boot(): Promise<void> {
   const token = ensurePairingToken(dal);
   const registry = makeRegistry(loadBuiltins(resourceDir('adapters/builtin')));
   const gateway = new WsGateway({ token, log: (m) => console.log(`[gateway] ${m}`) });
-  const runService = makeRunService({ dal, gateway, registry, log: (m) => console.log(`[run] ${m}`) });
+  const aiService = makeAiService({ dal, settings: dal.settings.get('ai') as import('./ai/index.js').AiSettings });
+  const runService = makeRunService({ dal, gateway, registry, ai: aiService, log: (m) => console.log(`[run] ${m}`) });
   const gmail = makeGmailService({ dal, gmailClientFactory: makeGmailClientFactory(dal), log: (m) => console.log(`[gmail] ${m}`) });
+  const discovery = makeDiscoveryService({ dal, discoveryDal: dal.discovery, spacingMs: 1500, log: (m) => console.log(`[discovery] ${m}`) });
+  const openExternal = (url: string): Promise<void> => shell.openExternal(url);
 
   server = await startServer({
     db,
@@ -68,9 +86,15 @@ async function boot(): Promise<void> {
         dal,
         runService,
         registry,
+        aiService,
+        discovery,
         token,
         version: app.getVersion(),
-        extend: (api) => mountGmailApi(api, gmail, dal),
+        unsealV11,
+        extend: (api) => {
+          mountGmailApi(api, gmail, dal);
+          mountGmailConnectApi(api, dal, { openExternal, log: (m) => console.log(`[gmail] ${m}`) });
+        },
         frontWindow: () => {
           const [win] = BrowserWindow.getAllWindows();
           if (win) {
@@ -84,6 +108,7 @@ async function boot(): Promise<void> {
       }),
   });
   gmail.start(); // scheduled status sync — dormant until a Gmail account is connected (OAuth is a user step)
+  discovery.start(); // per-lane ATS sourcing (gated on settings.discovery.enabled)
   gateway.attach(server.server as unknown as import('node:http').Server); // ws /drive on the same loopback server
 
   console.log(`[jat13] db schema v${opened.migration.to} @ ${dbFile}`);

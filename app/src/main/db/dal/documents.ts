@@ -298,6 +298,13 @@ export function makeDocumentsDal(ctx: DalContext) {
     emit('update', id, { is_default: true, role: doc.role });
   }
 
+  /** Delete a document (blob + text sidecars cascade via FK ON DELETE CASCADE). Returns true if it existed. */
+  function remove(id: string): boolean {
+    const info = stmt('DELETE FROM documents WHERE id = @id').run({ id });
+    if (info.changes > 0) emit('delete', id, {});
+    return info.changes > 0;
+  }
+
   return {
     add,
     addMissing,
@@ -307,5 +314,6 @@ export function makeDocumentsDal(ctx: DalContext) {
     getText,
     getKeywords,
     setDefault,
+    remove,
   };
 }

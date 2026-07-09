@@ -7,7 +7,8 @@
 import type { Dal } from '../db/dal/index.js';
 import type { RunGateway } from './gateway.js';
 import { driveRun, type DriveOutcome } from './runner.js';
-import { makeResolver } from './answer-resolver.js';
+import { makeResolver, makeAiAwareResolver } from './answer-resolver.js';
+import type { AiService } from '../ai/index.js';
 import type { Registry } from '../adapters/registry.js';
 import { LINKEDIN_DAILY_CAP } from '@jat13/shared';
 
@@ -19,6 +20,8 @@ export interface RunServiceDeps {
   dal: Dal;
   gateway: RunGateway;
   registry: Registry;
+  /** the Codex AI service — when present, adds the AI fallback rung to screening answers. */
+  ai?: AiService;
   /** ms between idle polls for a queued run. */
   pollMs?: number;
   now?: () => number;
@@ -88,12 +91,24 @@ export function makeRunService(deps: RunServiceDeps): RunService {
       profileData = {};
     }
 
-    const resolve = makeResolver({
-      answers: dal.answers,
-      profile: { data: profileData },
-      fieldMap: adapter.fieldMap,
-      profileId,
-    });
+    const baseArgs = { answers: dal.answers, profile: { data: profileData }, fieldMap: adapter.fieldMap, profileId };
+    let resolve;
+    if (deps.ai) {
+      const aiCfg = dal.settings.get('ai') as { enabled?: boolean; answerConfidenceMin?: number };
+      const job: NonNullable<Parameters<typeof makeAiAwareResolver>[0]['aiContext']>['job'] = {};
+      if (detail?.title) job.title = detail.title;
+      if (detail?.company) job.company = detail.company;
+      if (detail?.location) job.location = detail.location;
+      resolve = makeAiAwareResolver({
+        ...baseArgs,
+        ai: deps.ai,
+        aiEnabled: aiCfg.enabled !== false,
+        answerConfidenceMin: aiCfg.answerConfidenceMin ?? 0.6,
+        aiContext: { job },
+      });
+    } else {
+      resolve = makeResolver(baseArgs);
+    }
 
     log(`run ${run.id}: driving ${jobUrl} via ${adapter.id}`);
     const outcome = await driveRun(run.id, { runs: dal.runs, gateway, adapter, resolve, jobUrl, now });

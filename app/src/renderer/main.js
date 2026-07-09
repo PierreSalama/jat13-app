@@ -1,34 +1,87 @@
-// JAT 13 renderer — plain ES module, no framework. Wears v11's Atelier look (styles.css copied
-// verbatim) but is a FRESH renderer wired to v13's REAL loopback REST API (snake_case DTOs, the
-// X-JAT13-Token pairing header). Every control here maps to a real v13 route — features v11 had that
-// v13 does not (AI composer, taught procedures, job discovery, document upload) are absent, not faked.
-import { THEMES, applyTheme, DEFAULT_THEME } from './lib/themes.js';
+// ============================================================================
+// JAT 13 — Atelier Noir renderer. Plain ES modules, no framework. Every control
+// binds to the REAL v13 loopback REST API (X-JAT13-Token pairing header). Built
+// for scale: large lists virtualize, polls diff-not-rebuild, timers die on route
+// change, fetches abort when superseded. Nothing here fakes data — a route that
+// is not live yet renders a graceful "coming online" state, never a crash.
+// ============================================================================
+import { THEMES, applyTheme, DEFAULT_THEME, normalizeMode, getMode } from './lib/themes.js';
+import { signet, icon } from './lib/icons.js';
 
 // ---------------------------------------------------------------------------
-// tiny DOM helpers (same idiom as v11 app.js)
+// tiny DOM helpers
 // ---------------------------------------------------------------------------
 const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const el = (html) => { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstElementChild; };
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 const LS_THEME = 'jat13.theme';
+
+// ---------------------------------------------------------------------------
+// formatting
+// ---------------------------------------------------------------------------
+function fmtTime(ms) { if (!ms) return '—'; const d = new Date(ms); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; }
+function fmtDate(ms) { if (!ms) return '—'; const d = new Date(ms); return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }); }
+function fmtDateTime(ms) { if (!ms) return '—'; const d = new Date(ms); return `${fmtDate(ms)} · ${fmtTime(ms)}`; }
+function fmtAgo(ms) {
+  if (!ms) return '—';
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60); if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60); if (h < 48) return `${h}h`;
+  const d = Math.floor(h / 24); if (d < 30) return `${d}d`;
+  return `${Math.floor(d / 30)}mo`;
+}
+function fmtBytes(n) { if (n == null) return '—'; if (n < 1024) return `${n} B`; if (n < 1048576) return `${(n / 1024).toFixed(0)} KB`; return `${(n / 1048576).toFixed(1)} MB`; }
+const num = (n) => (n == null ? '0' : Number(n).toLocaleString());
+function initials(name) { const p = String(name || '').trim().split(/\s+/); return ((p[0]?.[0] || '') + (p[1]?.[0] || '')).toUpperCase() || 'PS'; }
+
+// ---------------------------------------------------------------------------
+// human vocabulary — never show raw enum ids
+// ---------------------------------------------------------------------------
+const STATUS_ORDER = ['tracked', 'submitted', 'acknowledged', 'assessment', 'interview_1', 'interview_2', 'interview_final', 'offer', 'hired', 'rejected', 'withdrawn', 'ghosted'];
+const STATUS_LABEL = {
+  tracked: 'Saved', submitted: 'Applied', acknowledged: 'Acknowledged', assessment: 'Assessment',
+  interview_1: 'Interview 1', interview_2: 'Interview 2', interview_final: 'Final interview',
+  offer: 'Offer', hired: 'Hired', rejected: 'Rejected', withdrawn: 'Withdrawn', ghosted: 'Ghosted',
+};
+const STATUS_DOT = {
+  tracked: 'dim', submitted: 'bronze', acknowledged: 'sage', assessment: 'ember',
+  interview_1: 'gold', interview_2: 'gold', interview_final: 'gold',
+  offer: 'bronze', hired: 'sage', rejected: 'danger', withdrawn: 'dim', ghosted: 'dim',
+};
+const TERMINAL_STATUS = new Set(['rejected', 'withdrawn', 'ghosted', 'hired']);
+const RUN_STATE = {
+  queued: { label: 'Queued', pct: 8 }, leased: { label: 'Starting', pct: 16 },
+  navigating: { label: 'Reading page', pct: 32 }, classifying: { label: 'Reading page', pct: 46 },
+  driving: { label: 'Filling form', pct: 66 }, verifying: { label: 'Verifying submit', pct: 88 },
+  waiting_page: { label: 'Waiting on page', pct: 52 }, needs_human: { label: 'Needs you', pct: 100 },
+  submitted: { label: 'Submitted', pct: 100 }, ready_for_review: { label: 'Ready for review', pct: 96 },
+  parked: { label: 'Parked', pct: 100 }, skipped: { label: 'Skipped', pct: 100 }, failed: { label: 'Failed', pct: 100 },
+};
+const ACTIVE_STATES = ['leased', 'navigating', 'classifying', 'driving', 'verifying', 'waiting_page'];
+const TERMINAL_RUN = new Set(['submitted', 'ready_for_review', 'parked', 'skipped', 'failed']);
+const PARK_LABEL = {
+  captcha: 'CAPTCHA', cloudflare: 'Cloudflare check', login: 'Sign-in required', account_wall: 'Account wall',
+  resume_required: 'Résumé required', needs_answer: 'Screening question', awaiting_review: 'Awaiting your review',
+  external_redirect: 'External site', rate_limited: 'Rate limited', other: 'Needs attention',
+};
+const ANSWERABLE_PARK = new Set(['needs_answer', 'other', 'awaiting_review']);
+const SRC_TAG = { linkedin: 'in', indeed: 'id', lever: 'lv', greenhouse: 'gh', ashby: 'as', workday: 'wd', bamboohr: 'bh', icims: 'ic', web: 'w', };
+function srcTag(source) { const s = String(source || '').toLowerCase(); const t = SRC_TAG[s] || s.slice(0, 2) || '·'; return `<span class="src-tag" title="${esc(source || '')}">${esc(t)}</span>`; }
+function statusBadge(status) { return `<span class="sbadge"><span class="dot ${STATUS_DOT[status] || 'dim'}"></span>${esc(STATUS_LABEL[status] || status)}</span>`; }
 
 // ---------------------------------------------------------------------------
 // bootstrap config + pairing token
 // ---------------------------------------------------------------------------
 const state = {
-  base: 'http://127.0.0.1:7860',
-  token: null,
-  version: '',
-  online: false,
-  applying: false,
-  needsYou: 0,
-  settings: null,
-  pollTimer: null,
+  base: 'http://127.0.0.1:7860', token: null, version: '', online: false,
+  applying: false, needsYou: 0, settings: null, profileId: null, profileName: 'Pierre Salama',
+  gmail: null, routeGen: 0,
 };
 
-/** Resolve {base, token}. Preferred: the preload bridge (window.jat13.config). Fallback (dev in a
- *  browser): probe the two candidate loopback ports for the loopback-trusted pairing token. */
 async function bootstrap() {
   if (window.jat13?.config) {
     try {
@@ -36,7 +89,7 @@ async function bootstrap() {
       if (cfg?.port) state.base = `http://127.0.0.1:${cfg.port}`;
       if (cfg?.token) state.token = cfg.token;
       if (cfg?.version) state.version = cfg.version;
-      if (state.token) return;
+      if (state.token) return true;
     } catch { /* fall through to probe */ }
   }
   for (const port of [7860, 7861]) {
@@ -44,755 +97,1360 @@ async function bootstrap() {
       const res = await fetch(`http://127.0.0.1:${port}/api/pair/token`, { signal: AbortSignal.timeout(1500) });
       if (!res.ok) continue;
       const body = await res.json();
-      if (body?.token) { state.base = `http://127.0.0.1:${port}`; state.token = body.token; state.version = body.version || ''; return; }
+      if (body?.token) { state.base = `http://127.0.0.1:${port}`; state.token = body.token; state.version = body.version || ''; return true; }
     } catch { /* try next port */ }
   }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
-// API helper — every /api call carries the token; 401 → not-connected screen.
+// API helper — token on every /api call; 401 → not-connected. Combined abort:
+// page-scoped signal (dies on nav) + a hard timeout.
 // ---------------------------------------------------------------------------
+function combineSignals(sigs) { const s = sigs.filter(Boolean); if (s.length === 1) return s[0]; if (AbortSignal.any) return AbortSignal.any(s); return s[0]; }
 async function api(path, opts = {}) {
-  const { method = 'GET', body, raw = false, timeoutMs = 20000 } = opts;
+  const { method = 'GET', body, raw = false, timeoutMs = 20000, signal, formData } = opts;
+  const signals = combineSignals([signal, AbortSignal.timeout(timeoutMs)]);
   let res;
   try {
+    const headers = { 'X-JAT13-Token': state.token || '' };
+    if (body !== undefined) headers['content-type'] = 'application/json';
     res = await fetch(state.base + '/api' + path, {
-      method,
-      headers: {
-        'X-JAT13-Token': state.token || '',
-        ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
-      },
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(timeoutMs),
+      method, headers,
+      body: formData !== undefined ? formData : (body !== undefined ? JSON.stringify(body) : undefined),
+      signal: signals,
     });
-  } catch {
+  } catch (e) {
+    if (e?.name === 'AbortError') { const err = new Error('aborted'); err.aborted = true; throw err; }
     const err = new Error('app unreachable'); err.status = 0; throw err;
   }
-  if (res.status === 401) { renderNotConnected(); const err = new Error('unauthorized'); err.status = 401; throw err; }
+  if (res.status === 401) { state.online = false; const err = new Error('unauthorized'); err.status = 401; throw err; }
   if (raw) { if (!res.ok) { const e = new Error('HTTP ' + res.status); e.status = res.status; throw e; } return res; }
   let data = {};
-  try { data = await res.json(); } catch {}
+  try { data = await res.json(); } catch { /* empty */ }
   if (!res.ok) { const err = new Error(data?.message || data?.error || 'HTTP ' + res.status); err.status = res.status; err.code = data?.error; throw err; }
   return data;
 }
-/** GET /health — ROOT route (not under /api), no token. Drives the runtime dot + version. */
-async function health() {
-  const res = await fetch(state.base + '/health', { signal: AbortSignal.timeout(4000) });
-  if (!res.ok) throw new Error('health ' + res.status);
-  return res.json();
-}
-
-// ---------------------------------------------------------------------------
-// theme
-// ---------------------------------------------------------------------------
-function setTheme(id, persist = true) {
-  applyTheme(id);
-  try { localStorage.setItem(LS_THEME, id); } catch {}
-  if (persist && state.token) {
-    api('/settings/appearance/themeId', { method: 'PUT', body: { value: id } }).catch(() => {});
-  }
-}
+async function health() { const res = await fetch(state.base + '/health', { signal: AbortSignal.timeout(4000) }); if (!res.ok) throw new Error('health ' + res.status); return res.json(); }
 
 // ---------------------------------------------------------------------------
 // toasts
 // ---------------------------------------------------------------------------
-function toast(msg, kind = 'info', opts = {}) {
-  const box = $('#toasts');
-  if (!box) return () => {};
-  const t = document.createElement('div');
-  t.className = 'toast' + (kind && kind !== 'info' ? ' ' + kind : '');
-  const span = document.createElement('span');
-  span.className = 'toast-msg';
-  span.textContent = msg;
-  t.appendChild(span);
-  let closed = false;
-  const close = () => { if (closed) return; closed = true; t.remove(); };
-  const x = document.createElement('button');
-  x.className = 'toast-x'; x.textContent = '×'; x.setAttribute('aria-label', 'Dismiss');
-  x.addEventListener('click', close);
-  t.appendChild(x);
+function toast(msg, kind = 'info', ttl) {
+  const box = $('#toasts'); if (!box) return () => {};
+  const t = el(`<div class="toast ${kind !== 'info' ? kind : ''}"><span class="toast-msg"></span><button class="toast-x" aria-label="Dismiss">×</button></div>`);
+  t.querySelector('.toast-msg').textContent = msg;
+  let done = false; const close = () => { if (done) return; done = true; t.remove(); };
+  t.querySelector('.toast-x').addEventListener('click', close);
   box.appendChild(t);
-  const ttl = opts.ttl !== undefined ? opts.ttl : (kind === 'danger' ? 8000 : 5000);
-  if (ttl > 0) setTimeout(close, ttl);
+  const life = ttl !== undefined ? ttl : (kind === 'danger' ? 8000 : 4500);
+  if (life > 0) setTimeout(close, life);
   return close;
 }
-const errToast = (e, prefix = '') => toast((prefix ? prefix + ': ' : '') + (e?.message || String(e)), 'danger');
+const errToast = (e, prefix = '') => { if (e?.aborted) return; toast((prefix ? prefix + ' — ' : '') + (e?.message || String(e)), 'danger'); };
 
 // ---------------------------------------------------------------------------
-// overlays (modal + palette)
+// overlays (palette + drawer)
 // ---------------------------------------------------------------------------
-function openOverlay(node) {
+function openOverlay(node, { onClose } = {}) {
   const root = $('#overlay-root');
-  const ov = document.createElement('div');
-  ov.className = 'overlay';
+  const ov = el('<div class="overlay"></div>');
   ov.appendChild(node);
-  ov.addEventListener('mousedown', (e) => { if (e.target === ov) ov.remove(); });
+  ov.addEventListener('mousedown', (e) => { if (e.target === ov) { ov.remove(); onClose?.(); } });
   root.appendChild(ov);
-  return () => ov.remove();
+  return () => { ov.remove(); onClose?.(); };
 }
-function closeTopOverlay() {
-  const ovs = document.querySelectorAll('#overlay-root .overlay');
-  if (ovs.length) { ovs[ovs.length - 1].remove(); return true; }
-  return false;
-}
-function closeAllOverlays() { document.querySelectorAll('#overlay-root .overlay').forEach((o) => o.remove()); }
+function closeTopOverlay() { const ovs = $$('#overlay-root .overlay'); if (ovs.length) { ovs[ovs.length - 1].remove(); return true; } return false; }
 
 // ---------------------------------------------------------------------------
-// labels + formatting
+// theme
 // ---------------------------------------------------------------------------
-const STATUS_ORDER = ['tracked', 'submitted', 'acknowledged', 'assessment', 'interview_1', 'interview_2', 'interview_final', 'offer', 'hired', 'rejected', 'withdrawn', 'ghosted'];
-const STATUS_LABEL = {
-  tracked: 'Tracked', submitted: 'Submitted', acknowledged: 'Acknowledged', assessment: 'Assessment',
-  interview_1: 'Interview 1', interview_2: 'Interview 2', interview_final: 'Final interview',
-  offer: 'Offer', hired: 'Hired', rejected: 'Rejected', withdrawn: 'Withdrawn', ghosted: 'Ghosted',
-};
-const RUN_STATE_LABEL = {
-  queued: 'Queued', dispatched: 'Dispatched', waiting_page: 'Waiting on page', running: 'Running',
-  needs_human: 'Needs you', ready_for_review: 'Ready for review', submitted: 'Submitted',
-  skipped: 'Skipped', failed: 'Failed', parked: 'Parked', done: 'Done',
-};
-const fmtDate = (ms) => (ms ? new Date(ms).toLocaleString() : '—');
-const fmtDay = (ms) => (ms ? new Date(ms).toLocaleDateString() : '—');
-const relTime = (ms) => {
-  if (!ms) return '—';
-  const s = Math.floor((Date.now() - ms) / 1000);
-  if (s < 60) return s + 's ago';
-  if (s < 3600) return Math.floor(s / 60) + 'm ago';
-  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
-  return Math.floor(s / 86400) + 'd ago';
-};
-
-// muted line reused wherever a v11 capability is not yet in v13
-const DISCOVERY_NOTE = 'Job discovery arrives in a later v13 update — use the Import wizard or the Track button in the extension to feed the queue.';
+function setTheme(mode, persist = true) {
+  const m = normalizeMode(mode);
+  applyTheme(m);
+  try { localStorage.setItem(LS_THEME, m); } catch { /* ignore */ }
+  if (persist && state.token) {
+    const v = m === 'system' ? 'system' : m; // enum accepts system/light/dark
+    api('/settings/appearance/theme', { method: 'PUT', body: { value: v } }).catch(() => {});
+  }
+}
+function initTheme() {
+  let m = DEFAULT_THEME;
+  try { const s = localStorage.getItem(LS_THEME); if (s) m = normalizeMode(s); } catch { /* ignore */ }
+  applyTheme(m);
+}
 
 // ---------------------------------------------------------------------------
-// router
+// job cache — lazy title/company fill (only ever fetched for VISIBLE rows, so
+// virtualization naturally bounds the fan-out). Waiters re-render on resolve.
 // ---------------------------------------------------------------------------
-const routes = [];
-function route(pattern, render) { routes.push({ pattern, render }); }
-function resolve(path) {
-  for (const r of routes) {
-    if (typeof r.pattern === 'string') { if (r.pattern === path) return { render: r.render, params: {} }; }
-    else { const m = path.match(r.pattern); if (m) return { render: r.render, params: m.groups || {} }; }
-  }
-  return null;
-}
-let navSeq = 0;
-async function navigate() {
-  const path = (location.hash.replace(/^#/, '') || '/').replace(/\/+$/, '') || '/';
-  document.querySelectorAll('.nav-item').forEach((n) => {
-    const r = n.dataset.route;
-    n.classList.toggle('active', r === path || (r !== '/' && path.startsWith(r + '/')));
-  });
-  closeAllOverlays();
-  if (!state.token) { renderNotConnected(); return; }
-  const seq = ++navSeq;
-  const match = resolve(path) || resolve('/');
-  const main = $('#main');
-  const loadT = setTimeout(() => { if (seq === navSeq) main.replaceChildren(skeleton()); }, 130);
-  try {
-    const node = await match.render(match.params);
-    clearTimeout(loadT);
-    if (seq !== navSeq) return;
-    main.replaceChildren(node);
-  } catch (e) {
-    clearTimeout(loadT);
-    if (seq !== navSeq) return;
-    if (e && e.status === 401) return;
-    main.replaceChildren(errorView(e));
-  }
+const jobCache = new Map();      // id -> {title, company, ...}
+const jobPending = new Set();    // id currently fetching
+const jobWaiters = new Map();    // id -> Set(callback)
+function jobKnown(id) { return jobCache.get(id) || null; }
+function ensureJob(id, cb) {
+  if (!id) return;
+  const hit = jobCache.get(id);
+  if (hit) { cb?.(hit); return; }
+  if (cb) { if (!jobWaiters.has(id)) jobWaiters.set(id, new Set()); jobWaiters.get(id).add(cb); }
+  if (jobPending.has(id)) return;
+  jobPending.add(id);
+  api(`/jobs/${encodeURIComponent(id)}`).then((j) => {
+    jobCache.set(id, { title: j.title || 'Untitled role', company: j.company || '', source: j.source, job_url: j.job_url, apply_capability: j.apply_capability, fit_score: j.fit_score, location: j.location });
+    const w = jobWaiters.get(id); if (w) { w.forEach((f) => { try { f(jobCache.get(id)); } catch { /* ignore */ } }); jobWaiters.delete(id); }
+  }).catch(() => { jobCache.set(id, { title: 'Role', company: '' }); const w = jobWaiters.get(id); if (w) { w.forEach((f) => f(jobCache.get(id))); jobWaiters.delete(id); } })
+    .finally(() => jobPending.delete(id));
 }
 
-function skeleton() {
-  return el('<div class="sk-grid"><div class="sk-card"><div class="sk-line"></div><div class="sk-line"></div></div><div class="sk-card"><div class="sk-line"></div><div class="sk-line"></div></div></div>');
+// ---------------------------------------------------------------------------
+// per-route lifecycle: timers + abort. routeGen guards stale async DOM writes.
+// ---------------------------------------------------------------------------
+let pageTimers = [];
+let pageAbort = new AbortController();
+function resetPage() {
+  pageTimers.forEach(clearInterval); pageTimers = [];
+  try { pageAbort.abort(); } catch { /* ignore */ }
+  pageAbort = new AbortController();
+  state.routeGen++;
 }
-function errorView(e) {
-  const v = el(`<div><div class="empty">
-    <div class="empty-mark"></div>
-    <div class="empty-eyebrow">App offline</div>
-    <div class="empty-title">The app brain isn't answering</div>
-    <div class="empty-sub"></div>
-    <div class="mt"><button class="btn primary" data-retry>Retry</button></div>
-  </div></div>`);
-  $('.empty-sub', v).textContent = (e?.message ? e.message + ' — ' : '') + 'Start JAT 13, then retry.';
-  $('[data-retry]', v).addEventListener('click', navigate);
-  return v;
+/** guarded interval: skips overlapping ticks, bails if the route changed under it. */
+function poll(ms, fn, immediate = true) {
+  const gen = state.routeGen; let inFlight = false;
+  const tick = async () => {
+    if (inFlight || gen !== state.routeGen) return;
+    inFlight = true;
+    try { await fn(); } catch (e) { if (!e?.aborted && e?.status === 401) showNotConnected(); }
+    finally { inFlight = false; }
+  };
+  if (immediate) tick();
+  pageTimers.push(setInterval(tick, ms));
 }
-function renderNotConnected() {
-  const main = $('#main');
-  if (!main) return;
-  const v = el(`<div><div class="empty">
-    <div class="empty-mark"></div>
-    <div class="empty-eyebrow">Not connected</div>
-    <div class="empty-title">This dashboard couldn't reach the app brain</div>
-    <div class="empty-sub">The desktop app could not hand over its access token. Restart JAT 13; if this persists, check the logs.</div>
-    <div class="mt"><button class="btn primary" data-retry>Retry</button></div>
-  </div></div>`);
-  $('[data-retry]', v).addEventListener('click', () => bootstrap().then(navigate));
-  main.replaceChildren(v);
-}
+const psig = () => pageAbort.signal;
 
-function pageHeader(eyebrow, title, sub, actionsHtml = '') {
-  return `<header class="page-header">
-    <div>
-      <div class="page-eyebrow">${esc(eyebrow)}</div>
-      <h1 class="page-title">${esc(title)}</h1>
-      ${sub ? `<div class="page-sub">${esc(sub)}</div>` : ''}
-    </div>
-    ${actionsHtml ? `<div class="page-actions">${actionsHtml}</div>` : ''}
-  </header>`;
-}
-function emptyHtml(eyebrow, title, sub) {
-  return `<div class="empty"><div class="empty-mark"></div><div class="empty-eyebrow">${esc(eyebrow)}</div><div class="empty-title">${esc(title)}</div><div class="empty-sub">${esc(sub)}</div></div>`;
-}
-function statusChip(s) { return `<span class="status-chip" data-status="${esc(s)}"><span class="dot"></span>${esc(STATUS_LABEL[s] || s)}</span>`; }
-function stateChip(s) { return `<span class="state-chip" data-state="${esc(s)}">${esc(RUN_STATE_LABEL[s] || s)}</span>`; }
-
-// ===========================================================================
-// PAGES
-// ===========================================================================
-
-// ---- Dashboard ------------------------------------------------------------
-route('/', async () => {
-  const [stats, summary, events] = await Promise.all([
-    api('/stats'),
-    api('/summary'),
-    api('/events/recent?limit=8').catch(() => ({ rows: [] })),
-  ]);
-  const funnel = stats.funnel || {};
-  const totals = stats.totals || {};
-  const runs = stats.runs || { byState: {}, total: 0 };
-  const byState = runs.byState || {};
-
-  const v = el(`<div>
-    ${pageHeader('Overview', 'Dashboard', 'A considered record of your job search.',
-      '<button class="btn" data-refresh>Refresh</button>')}
-    <section class="stats stats-5">
-      <div class="stat"><div class="stat-label">Jobs tracked</div><div class="stat-value">${totals.jobs ?? 0}</div><div class="stat-delta">across all sources</div></div>
-      <div class="stat"><div class="stat-label">Applications</div><div class="stat-value">${totals.applications ?? 0}</div><div class="stat-delta">total on record</div></div>
-      <div class="stat"><div class="stat-label">Submitted 7d</div><div class="stat-value gold">${totals.submitted7d ?? 0}</div><div class="stat-delta">last 7 days</div></div>
-      <div class="stat"><div class="stat-label">Runs 24h</div><div class="stat-value">${runs.total ?? 0}</div><div class="stat-delta">${byState.submitted || 0} submitted · ${byState.failed || 0} failed</div></div>
-      <div class="stat clickable" data-go-queue><div class="stat-label">Needs you</div><div class="stat-value ${summary.needsYou ? 'warn' : ''}">${summary.needsYou ?? 0}</div><div class="stat-delta">${summary.applying ? 'auto-apply running' : 'auto-apply idle'}</div></div>
-    </section>
-
-    <div class="dash-cols">
-      <section class="section">
-        <div class="section-header"><div><div class="section-eyebrow">Pipeline</div><div class="section-title">Applications by stage (90d)</div></div><a href="#/pipeline" class="section-link">Open board →</a></div>
-        <div class="section-body" data-funnel></div>
-      </section>
-      <section class="section">
-        <div class="section-header"><div><div class="section-eyebrow">Activity</div><div class="section-title">Recent events</div></div><a href="#/activity" class="section-link">All activity →</a></div>
-        <div class="section-body"><div class="feed" data-feed></div></div>
-      </section>
-    </div>
-  </div>`);
-
-  $('[data-funnel]', v).innerHTML = funnelHtml(funnel);
-  const feed = $('[data-feed]', v);
-  const rows = events.rows || [];
-  feed.innerHTML = rows.length
-    ? rows.map((e) => `<div class="feed-item"><span class="feed-icon">≋</span><div class="feed-text">${esc(e.kind || 'event')}${e.summary ? ' — ' + esc(e.summary) : ''}<div class="feed-meta">${esc(relTime(e.at))}</div></div></div>`).join('')
-    : emptyHtml('Quiet', 'No activity yet', DISCOVERY_NOTE);
-
-  $('[data-refresh]', v).addEventListener('click', navigate);
-  $('[data-go-queue]', v).addEventListener('click', () => { location.hash = '#/queue'; });
-  return v;
-});
-
-function funnelHtml(funnel) {
-  const entries = STATUS_ORDER.map((s) => [s, funnel[s] || 0]).filter(([, n]) => n > 0);
-  if (!entries.length) return emptyHtml('Empty funnel', 'No applications in the last 90 days', DISCOVERY_NOTE);
-  const max = Math.max(...entries.map(([, n]) => n), 1);
-  return entries.map(([s, n]) => {
-    const pct = Math.max(4, Math.round((n / max) * 100));
-    return `<div class="fn-row"><div class="fn-top"><span class="fn-label">${esc(STATUS_LABEL[s] || s)}</span><span class="fn-n">${n}</span></div><div class="fn-bar"><div class="fn-fill" style="width:${pct}%"></div></div></div>`;
-  }).join('');
-}
-
-// ---- Applications ---------------------------------------------------------
-route('/applications', async () => {
-  const status = sessionStorage.getItem('jat13.appStatus') || 'all';
-  const q = status === 'all' ? '' : `?status=${encodeURIComponent(status)}`;
-  const data = await api('/applications' + q + (q ? '&' : '?') + 'limit=200');
-  const rows = data.rows || [];
-
-  const opts = ['all', ...STATUS_ORDER].map((s) => `<option value="${esc(s)}" ${s === status ? 'selected' : ''}>${s === 'all' ? 'All statuses' : esc(STATUS_LABEL[s] || s)}</option>`).join('');
-  const v = el(`<div>
-    ${pageHeader('Track', 'Applications', `${data.total ?? rows.length} on record`,
-      '<button class="btn" data-refresh>Refresh</button>')}
-    <div class="toolbar"><select class="select" data-filter>${opts}</select><input class="input tb-search" id="f-q" placeholder="Filter this page…" /></div>
-    <div class="table-wrap"><table class="table"><thead><tr>
-      <th>Status</th><th>Job</th><th>Via</th><th>Next action</th><th>Updated</th><th></th>
-    </tr></thead><tbody data-body></tbody></table></div>
-  </div>`);
-
-  const body = $('[data-body]', v);
-  function paint(list) {
-    body.innerHTML = list.length
-      ? list.map((a) => `<tr data-id="${esc(a.id)}">
-          <td>${statusChip(a.status)}</td>
-          <td class="mono">${esc(a.job_id || '')}</td>
-          <td>${a.via ? `<span class="via-badge">${esc(a.via)}</span>` : '<span class="muted">—</span>'}</td>
-          <td>${a.needs_review ? '<span class="pill warn">Review</span>' : (a.next_action ? esc(a.next_action) : '<span class="muted">—</span>')}</td>
-          <td class="muted nowrap">${esc(relTime(a.updated_at))}</td>
-          <td><button class="btn-link" data-timeline="${esc(a.id)}">Timeline</button></td>
-        </tr>`).join('')
-      : `<tr><td colspan="6">${emptyHtml('Quiet ledger', 'No applications match', DISCOVERY_NOTE)}</td></tr>`;
-    body.querySelectorAll('[data-timeline]').forEach((b) => b.addEventListener('click', () => openTimeline(b.dataset.timeline)));
-  }
-  paint(rows);
-
-  $('[data-filter]', v).addEventListener('change', (e) => { sessionStorage.setItem('jat13.appStatus', e.target.value); navigate(); });
-  $('#f-q', v).addEventListener('input', (e) => {
-    const term = e.target.value.trim().toLowerCase();
-    paint(!term ? rows : rows.filter((a) => (a.job_id + ' ' + (a.via || '') + ' ' + a.status).toLowerCase().includes(term)));
-  });
-  $('[data-refresh]', v).addEventListener('click', navigate);
-  return v;
-});
-
-async function openTimeline(id) {
-  let data;
-  try { data = await api(`/applications/${encodeURIComponent(id)}/timeline`); }
-  catch (e) { errToast(e, 'Timeline'); return; }
-  const events = data.events?.rows || data.events || [];
-  const emails = data.emails || [];
-  const m = el(`<div class="modal">
-    <div class="modal-head"><h3 class="modal-title">Application timeline</h3><button class="toast-x" data-close>×</button></div>
-    <div class="modal-body">
-      <div class="timeline" data-tl></div>
-      <div class="mail-sub" style="margin-top:12px" data-emails></div>
-    </div>
-  </div>`);
-  $('[data-tl]', m).innerHTML = events.length
-    ? events.map((e) => `<div class="timeline-item"><div class="timeline-dot"></div><div><div class="timeline-title">${esc(e.kind || 'event')}${e.summary ? ' — ' + esc(e.summary) : ''}</div><div class="timeline-sub">${esc(fmtDate(e.at))}</div></div></div>`).join('')
-    : '<div class="muted">No events recorded yet.</div>';
-  $('[data-emails]', m).innerHTML = emails.length
-    ? `<div class="section-eyebrow">Matched emails</div>` + emails.map((e) => `<div class="mail-row"><div class="mail-subj">${esc(e.subject || '(no subject)')}</div><div class="mail-snip">${esc(e.snippet || '')}</div><div class="mail-meta muted">${esc(e.from_name || e.from_addr || '')} · ${esc(fmtDay(e.sent_at))}</div></div>`).join('')
-    : '';
-  const close = openOverlay(m);
-  $('[data-close]', m).addEventListener('click', close);
-}
-
-// ---- Pipeline (funnel board) ---------------------------------------------
-route('/pipeline', async () => {
-  const stats = await api('/stats');
-  const funnel = stats.funnel || {};
-  const v = el(`<div>
-    ${pageHeader('Track', 'Pipeline', 'Every application by stage (last 90 days).')}
-    <div class="kanban" data-board></div>
-  </div>`);
-  const board = $('[data-board]', v);
-  const cols = STATUS_ORDER.map((s) => {
-    const n = funnel[s] || 0;
-    return `<div class="kb-col"><div class="kb-head"><span class="kb-label">${esc(STATUS_LABEL[s] || s)}</span><span class="kb-n">${n}</span></div>
-      <div class="kb-body">${n ? `<div class="kb-card"><div class="kb-card-top"><span class="kb-title">${n} application${n === 1 ? '' : 's'}</span></div><div class="kb-meta"><span class="kb-sub">in ${esc(STATUS_LABEL[s] || s)}</span></div></div>` : '<div class="muted" style="padding:8px;font-size:12px">—</div>'}</div></div>`;
-  }).join('');
-  board.innerHTML = cols;
-  if (!STATUS_ORDER.some((s) => funnel[s])) board.innerHTML = emptyHtml('Empty board', 'No applications yet', DISCOVERY_NOTE);
-  return v;
-});
-
-// ---- Auto-apply (mission control) -----------------------------------------
-route('/queue', async () => {
-  const [status, needs, runsData] = await Promise.all([
-    api('/apply/status'),
-    api('/needs-you'),
-    api('/runs?limit=40'),
-  ]);
-  state.applying = !!status.running;
-  const live = (runsData.rows || []).filter((r) => ['queued', 'dispatched', 'waiting_page', 'running', 'needs_human', 'ready_for_review'].includes(r.state));
-  const history = (runsData.rows || []).filter((r) => ['submitted', 'skipped', 'failed', 'done', 'parked'].includes(r.state));
-
-  const v = el(`<div>
-    ${pageHeader('Automate', 'Auto-apply', 'Mission control for the apply engine.',
-      `<button class="btn ${state.applying ? 'danger' : 'primary'}" data-toggle>${state.applying ? 'Stop' : 'Start'} auto-apply</button>`)}
-
-    <section class="aa-master">
-      <div class="aa-power"><span class="aa-pulse ${state.applying ? 'on' : ''}"></span><span>${state.applying ? 'Engine running' : 'Engine idle'}</span></div>
-      <div class="aa-dash-grid">
-        <div class="mini"><div class="mini-label">In flight</div><div class="mini-value">${live.length}</div></div>
-        <div class="mini"><div class="mini-label">Needs you</div><div class="mini-value ${needs.needsHuman?.length ? 'warn' : ''}">${needs.needsHuman?.length || 0}</div></div>
-        <div class="mini"><div class="mini-label">Ready for review</div><div class="mini-value">${needs.readyForReview?.length || 0}</div></div>
-      </div>
-    </section>
-
-    <div class="aa-disco-note muted" style="margin:12px 0">${esc(DISCOVERY_NOTE)}</div>
-
-    ${needs.needsHuman?.length ? `<section class="section"><div class="section-header"><div><div class="section-eyebrow">Attention</div><div class="section-title">Needs you</div></div></div><div class="section-body needs-you" data-needs></div></section>` : ''}
-
-    <section class="section"><div class="section-header"><div><div class="section-eyebrow">Live</div><div class="section-title">Running now</div></div></div>
-      <div class="section-body aa-workers" data-live></div></section>
-
-    <section class="section"><div class="section-header"><div><div class="section-eyebrow">History</div><div class="section-title">Recent runs</div></div></div>
-      <div class="section-body hist-list" data-history></div></section>
-  </div>`);
-
-  const needsBox = $('[data-needs]', v);
-  if (needsBox) {
-    needsBox.innerHTML = needs.needsHuman.map((r) => `<div class="ny-card" data-run="${esc(r.id)}">
-      <div class="ny-title">${esc(r.source || 'run')} · ${stateChip(r.state)}</div>
-      <div class="ny-reason muted">${esc(r.park_kind || 'awaiting input')}</div>
-      <div class="ny-actions"><button class="btn small primary" data-answer="${esc(r.id)}" data-profile="${esc(r.profile_id || '')}">Answer</button></div>
-    </div>`).join('');
-    needsBox.querySelectorAll('[data-answer]').forEach((b) => b.addEventListener('click', () => openAnswer(b.dataset.answer, b.dataset.profile)));
-  }
-
-  const liveBox = $('[data-live]', v);
-  liveBox.innerHTML = live.length
-    ? live.map((r) => `<div class="aa-worker"><div class="aa-worker-head"><span class="aa-worker-title">${esc(r.source || 'run')}</span>${stateChip(r.state)}</div>
-        <div class="aa-worker-meta"><span class="aa-worker-co">${esc(r.route || r.lane || '')}</span><span class="aa-worker-elapsed">${esc(relTime(r.queued_at))}</span></div></div>`).join('')
-    : `<div class="aa-empty-live muted">Nothing in flight. ${state.applying ? 'Waiting for queued work.' : 'Start the engine to begin.'}</div>`;
-
-  const histBox = $('[data-history]', v);
-  histBox.innerHTML = history.length
-    ? history.map((r) => `<div class="hist-row"><div class="hist-main"><div class="hist-title">${esc(r.source || 'run')} · ${esc(r.route || r.lane || '')}</div><div class="hist-reason muted">${esc(r.park_kind || RUN_STATE_LABEL[r.state] || r.state)}</div></div><div class="hist-meta">${stateChip(r.state)}<div class="muted">${esc(relTime(r.updated_at))}</div></div></div>`).join('')
-    : `<div class="muted">No completed runs yet.</div>`;
-
-  $('[data-toggle]', v).addEventListener('click', async (e) => {
-    const btn = e.currentTarget; btn.disabled = true;
-    try {
-      await api(state.applying ? '/apply/stop' : '/apply/start', { method: 'POST' });
-      toast(state.applying ? 'Auto-apply stopped' : 'Auto-apply started');
-      navigate();
-    } catch (err) { errToast(err); btn.disabled = false; }
-  });
-  return v;
-});
-
-async function openAnswer(runId, profileId) {
-  let needs;
-  try { needs = await api('/needs-you'); } catch (e) { errToast(e); return; }
-  const run = (needs.needsHuman || []).find((r) => r.id === runId);
-  let questions = [];
-  try { questions = JSON.parse(run?.pending_questions_json || '[]'); } catch { questions = []; }
-  if (!Array.isArray(questions) || !questions.length) questions = [{ label: 'Answer for this run', kind: 'qa' }];
-
-  const m = el(`<div class="modal">
-    <div class="modal-head"><h3 class="modal-title">Answer screening questions</h3><button class="toast-x" data-close>×</button></div>
-    <div class="modal-body"><div class="form-grid" data-qs></div></div>
-    <div class="modal-foot"><button class="btn small" data-cancel>Cancel</button><button class="btn small primary" data-save>Submit & resume</button></div>
-  </div>`);
-  $('[data-qs]', m).innerHTML = questions.map((q, i) => `<div class="form-row"><label class="form-label">${esc(q.label || q.question || ('Question ' + (i + 1)))}</label><input class="input" data-q="${i}" value="${esc(q.value || '')}" /></div>`).join('');
-  const close = openOverlay(m);
-  $('[data-close]', m).addEventListener('click', close);
-  $('[data-cancel]', m).addEventListener('click', close);
-  $('[data-save]', m).addEventListener('click', async () => {
-    const answers = questions.map((q, i) => ({
-      profileId: profileId || run?.profile_id || '',
-      label: q.label || q.question || ('Question ' + (i + 1)),
-      value: $(`[data-q="${i}"]`, m).value,
-      kind: q.kind === 'field' ? 'field' : 'qa',
-    })).filter((a) => a.value.trim());
-    try {
-      await api(`/runs/${encodeURIComponent(runId)}/answer`, { method: 'POST', body: { answers } });
-      toast('Answers saved — run re-queued'); close(); navigate();
-    } catch (e) { errToast(e); }
-  });
-}
-
-// ---- Profile (editor + learned answers) -----------------------------------
-route('/profile', async () => {
-  const { rows: profiles } = await api('/profiles');
-  const active = profiles.find((p) => p.is_default) || profiles[0];
-  if (!active) {
-    const v = el(`<div>${pageHeader('Material', 'Profile')}${emptyHtml('No profile', 'No profile found', 'Import from v11 in Settings to create one.')}</div>`);
-    return v;
-  }
-  const [detail, answers] = await Promise.all([
-    api(`/profiles/${encodeURIComponent(active.id)}`),
-    api(`/answers?profileId=${encodeURIComponent(active.id)}&limit=300`),
-  ]);
-  const data = detail.data || {};
-  const v = el(`<div>
-    ${pageHeader('Material', 'Profile', esc(active.name), '<button class="btn primary" data-save>Save profile</button>')}
-    <div class="pf-grid">
-      <section class="section pf-main">
-        <div class="section-header"><div><div class="section-eyebrow">Identity</div><div class="section-title">Profile fields</div></div></div>
-        <div class="section-body">
-          <div class="pf-idrow"><label class="pf-flabel">Name</label><input class="input" data-name value="${esc(active.name)}" /></div>
-          <div class="pf-field"><label class="pf-flabel">Profile data (JSON)</label><textarea class="input" data-json rows="16" style="font-family:var(--mono,monospace)">${esc(JSON.stringify(data, null, 2))}</textarea></div>
-          <div class="form-hint muted">Stored as data_json (max 256KB). Must be valid JSON.</div>
-        </div>
-      </section>
-      <section class="section">
-        <div class="section-header"><div><div class="section-eyebrow">Memory</div><div class="section-title">Learned answers <span class="pf-mem-count">${answers.total ?? (answers.rows || []).length}</span></div></div></div>
-        <div class="section-body">
-          <input class="input doc-search" data-answersearch placeholder="Search learned answers…" />
-          <div class="rec-rows" data-answers></div>
-        </div>
-      </section>
-    </div>
-  </div>`);
-
-  const answersBox = $('[data-answers]', v);
-  function paintAnswers(list) {
-    answersBox.innerHTML = list.length
-      ? list.map((a) => `<div class="rec-row" data-aid="${esc(a.id)}">
-          <div class="rec-f"><div class="proc-label">${esc(a.label)}</div><div class="proc-val muted">${esc(a.key_norm)} · ${esc(a.provenance)}${a.locked ? ' · 🔒' : ''}</div></div>
-          <div class="rec-rm"><button class="btn-link" data-lock="${esc(a.id)}">${a.locked ? 'Unlock' : 'Lock'}</button><button class="btn-link danger" data-del="${esc(a.id)}">Delete</button></div>
-        </div>`).join('')
-      : '<div class="muted">No learned answers for this profile yet.</div>';
-    answersBox.querySelectorAll('[data-lock]').forEach((b) => b.addEventListener('click', async () => {
-      const a = list.find((x) => x.id === b.dataset.lock);
-      try { await api(`/answers/${encodeURIComponent(b.dataset.lock)}`, { method: 'PUT', body: { locked: !a.locked } }); navigate(); }
-      catch (e) { errToast(e); }
-    }));
-    answersBox.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => {
-      try { await api(`/answers/${encodeURIComponent(b.dataset.del)}`, { method: 'DELETE' }); toast('Answer deleted'); navigate(); }
-      catch (e) { errToast(e); }
-    }));
-  }
-  const allAnswers = answers.rows || [];
-  paintAnswers(allAnswers);
-  $('[data-answersearch]', v).addEventListener('input', debounce((e) => {
-    const t = e.target.value.trim().toLowerCase();
-    paintAnswers(!t ? allAnswers : allAnswers.filter((a) => (a.label + ' ' + a.key_norm).toLowerCase().includes(t)));
-  }, 150));
-
-  $('[data-save]', v).addEventListener('click', async () => {
-    let parsed;
-    try { parsed = JSON.parse($('[data-json]', v).value); }
-    catch { toast('Profile data is not valid JSON', 'danger'); return; }
-    try {
-      await api(`/profiles/${encodeURIComponent(active.id)}`, { method: 'PUT', body: { name: $('[data-name]', v).value, data: parsed } });
-      toast('Profile saved'); navigate();
-    } catch (e) { errToast(e); }
-  });
-  return v;
-});
-
-// ---- Documents (read-only; upload not server-wired) -----------------------
-route('/documents', async () => {
-  const { rows } = await api('/documents');
-  const v = el(`<div>
-    ${pageHeader('Material', 'Documents', 'Resumes and attachments on record.')}
-    <div class="form-hint muted" style="margin-bottom:12px">Uploading documents from the dashboard isn't wired in v13 yet — documents arrive via the v11 import. This is a read-only view.</div>
-    <div class="table-wrap"><table class="table"><thead><tr><th>Name</th><th>Role</th><th>Type</th><th>Size</th><th>Default</th><th>Added</th></tr></thead>
-      <tbody>${(rows || []).length
-        ? rows.map((d) => `<tr><td>${esc(d.name)}</td><td><span class="role-badge">${esc(d.role || '—')}</span></td><td class="muted">${esc(d.mime || '')}</td><td class="muted">${d.size_bytes ? Math.round(d.size_bytes / 1024) + ' KB' : '—'}</td><td>${d.is_default ? '<span class="pill">default</span>' : ''}</td><td class="muted">${esc(fmtDay(d.created_at))}</td></tr>`).join('')
-        : `<tr><td colspan="6">${emptyHtml('No documents', 'Nothing on record', 'Documents are imported from v11 for now.')}</td></tr>`}</tbody>
-    </table></div>
-  </div>`);
-  return v;
-});
-
-// ---- Activity -------------------------------------------------------------
-route('/activity', async () => {
-  const { rows } = await api('/events/recent?limit=100');
-  const v = el(`<div>
-    ${pageHeader('System', 'Activity', 'The event stream — most recent first.')}
-    <div class="feed">${(rows || []).length
-      ? rows.map((e) => `<div class="feed-item"><span class="feed-icon">≋</span><div class="feed-text">${esc(e.kind || 'event')}${e.summary ? ' — ' + esc(e.summary) : ''}<div class="feed-meta">${esc(fmtDate(e.at))}</div></div></div>`).join('')
-      : emptyHtml('Quiet', 'No activity yet', DISCOVERY_NOTE)}</div>
-  </div>`);
-  return v;
-});
-
-// ---- Settings -------------------------------------------------------------
-route('/settings', async () => {
-  const [settings, adapters, secrets, gmail] = await Promise.all([
-    api('/settings'),
-    api('/adapters').catch(() => ({ rows: [] })),
-    api('/secrets/health').catch(() => ({ rows: [] })),
-    api('/gmail/status').catch(() => null),
-  ]);
-  state.settings = settings;
-  const themeGrid = THEMES.map((t) => `<button class="swatch ${(document.body.dataset.theme === t.id) ? 'active' : ''}" data-theme-id="${esc(t.id)}" type="button" title="${esc(t.name)}">
-    <span class="swatch-chips"><span class="swatch-chip" style="background:${esc(t.vars.primary)}"></span><span class="swatch-chip" style="background:${esc(t.vars.primary2)}"></span><span class="swatch-chip" style="background:${esc(t.vars.bg2)}"></span></span>
-    <span class="swatch-name">${esc(t.name)}</span></button>`).join('');
-
-  const v = el(`<div>
-    ${pageHeader('System', 'Settings', 'Appearance, connections, and data.')}
-
-    <section class="section"><div class="section-header"><div><div class="section-eyebrow">Appearance</div><div class="section-title">Theme</div></div></div>
-      <div class="section-body"><div class="theme-grid">${themeGrid}</div></div></section>
-
-    <section class="section"><div class="section-header"><div><div class="section-eyebrow">Migration</div><div class="section-title">Import from JAT v11</div></div></div>
-      <div class="section-body">
-        <div class="form-hint muted">Point to a v11 jat.db snapshot. Quit v11 first — the import reads a consistent snapshot.</div>
-        <div class="url-row"><input class="input pf-grow" data-importpath placeholder="F:/…/jat.db" /><button class="btn" data-plan>Plan</button><button class="btn primary" data-exec disabled>Import</button></div>
-        <div class="status-line muted" data-importstatus></div>
-      </div></section>
-
-    <section class="section"><div class="section-header"><div><div class="section-eyebrow">Inbox</div><div class="section-title">Gmail</div></div></div>
-      <div class="section-body">
-        <div class="sync-row"><span class="muted">${gmail ? esc(gmailSummary(gmail)) : 'No Gmail account connected. Connect one in the app to pull application emails.'}</span>${gmail ? '<button class="btn small" data-gsync>Sync now</button>' : ''}</div>
-      </div></section>
-
-    <section class="section"><div class="section-header"><div><div class="section-eyebrow">Security</div><div class="section-title">Token health</div></div></div>
-      <div class="section-body">${(secrets.rows || []).length
-        ? `<div class="table-wrap"><table class="table"><thead><tr><th>Key</th><th>Status</th><th>Last OK</th></tr></thead><tbody>${secrets.rows.map((s) => `<tr><td class="mono">${esc(s.key)}</td><td>${esc(s.status)}</td><td class="muted">${esc(s.last_ok_at ? relTime(s.last_ok_at) : '—')}</td></tr>`).join('')}</tbody></table></div>`
-        : '<div class="muted">No secrets configured.</div>'}</div></section>
-
-    <section class="section"><div class="section-header"><div><div class="section-eyebrow">Engine</div><div class="section-title">Adapters</div></div></div>
-      <div class="section-body">${(adapters.rows || []).length
-        ? `<div class="table-wrap"><table class="table"><thead><tr><th>Adapter</th><th>Source</th><th>Version</th><th>Hosts</th><th>Pages</th></tr></thead><tbody>${adapters.rows.map((a) => `<tr><td class="mono">${esc(a.id)}</td><td>${esc(a.source)}</td><td class="muted">v${esc(a.version)}</td><td class="muted">${esc((a.hosts || []).join(', '))}</td><td>${a.pages}</td></tr>`).join('')}</tbody></table></div>`
-        : '<div class="muted">No adapters loaded.</div>'}</div></section>
-
-    <section class="section"><div class="section-header"><div><div class="section-eyebrow">Data</div><div class="section-title">Export</div></div></div>
-      <div class="section-body"><div class="sync-row"><span class="muted">Download jobs + applications as JSON.</span><button class="btn small" data-export>Export data</button></div></div></section>
-  </div>`);
-
-  v.querySelectorAll('[data-theme-id]').forEach((sw) => sw.addEventListener('click', () => {
-    setTheme(sw.dataset.themeId);
-    v.querySelectorAll('[data-theme-id]').forEach((x) => x.classList.toggle('active', x === sw));
-  }));
-
-  const planBtn = $('[data-plan]', v), execBtn = $('[data-exec]', v), st = $('[data-importstatus]', v);
-  planBtn.addEventListener('click', async () => {
-    const sourcePath = $('[data-importpath]', v).value.trim();
-    if (!sourcePath) { st.textContent = 'Enter a path first.'; return; }
-    planBtn.disabled = true; st.textContent = 'Planning…';
-    try {
-      const report = await api('/import/plan', { method: 'POST', body: { sourcePath } });
-      st.textContent = 'Plan ready: ' + JSON.stringify(report.counts || report);
-      execBtn.disabled = false;
-    } catch (e) {
-      st.textContent = e.code === 'V11_RUNNING' ? 'Quit JAT v11 first, then retry.' : ('Plan failed: ' + e.message);
-      execBtn.disabled = true;
-    } finally { planBtn.disabled = false; }
-  });
-  execBtn.addEventListener('click', async () => {
-    const sourcePath = $('[data-importpath]', v).value.trim();
-    execBtn.disabled = true; st.textContent = 'Importing…';
-    try { const res = await api('/import/execute', { method: 'POST', body: { sourcePath } }); st.textContent = 'Imported ✓ ' + JSON.stringify(res.counts || res); toast('Import complete'); }
-    catch (e) { st.textContent = e.code === 'V11_RUNNING' ? 'Quit JAT v11 first, then retry.' : ('Import failed: ' + e.message); }
-  });
-
-  const gsync = $('[data-gsync]', v);
-  if (gsync) gsync.addEventListener('click', async () => { gsync.disabled = true; try { await api('/gmail/sync', { method: 'POST', body: {} }); toast('Gmail sync started'); } catch (e) { errToast(e); } finally { gsync.disabled = false; } });
-
-  $('[data-export]', v).addEventListener('click', async () => {
-    try {
-      const res = await api('/export', { raw: true });
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a'); a.href = url; a.download = 'jat13-export.json'; a.click();
-      URL.revokeObjectURL(url);
-    } catch (e) { errToast(e); }
-  });
-  return v;
-});
-function gmailSummary(g) {
-  const rows = g.rows || g.accounts || [];
-  if (Array.isArray(rows) && rows.length) return `${rows.length} account${rows.length === 1 ? '' : 's'} connected`;
-  return 'Gmail connected';
-}
-
-// ===========================================================================
-// command palette (Ctrl/Cmd+K)
-// ===========================================================================
-const PAGES = [
-  { label: 'Dashboard', go: '#/' }, { label: 'Applications', go: '#/applications' },
-  { label: 'Pipeline', go: '#/pipeline' }, { label: 'Auto-apply', go: '#/queue' },
-  { label: 'Profile', go: '#/profile' }, { label: 'Documents', go: '#/documents' },
-  { label: 'Activity', go: '#/activity' }, { label: 'Settings', go: '#/settings' },
+// ============================================================================
+// SHELL — brand, nav, topbar, global poller
+// ============================================================================
+const NAV = [
+  { group: 'Operate', items: [
+    { route: '/', label: 'Command Center', icon: 'command', chord: 'C' },
+    { route: '/auto', label: 'Auto-Apply', icon: 'bolt', chord: 'A' },
+    { route: '/needs', label: 'Needs You', icon: 'bell', chord: 'N', badge: true },
+  ] },
+  { group: 'Track', items: [
+    { route: '/pipeline', label: 'Pipeline', icon: 'board', chord: 'P' },
+    { route: '/applications', label: 'Applications', icon: 'layers', chord: 'L' },
+    { route: '/inbox', label: 'Inbox', icon: 'mail', chord: 'I' },
+  ] },
+  { group: 'You', items: [
+    { route: '/profile', label: 'Profile', icon: 'user', chord: 'U' },
+    { route: '/documents', label: 'Documents', icon: 'doc', chord: 'D' },
+  ] },
+  { group: 'System', items: [
+    { route: '/activity', label: 'Activity', icon: 'activity', chord: 'Y' },
+    { route: '/settings', label: 'Settings', icon: 'settings', chord: 'S' },
+  ] },
 ];
-function openPalette() {
-  if (document.querySelector('#overlay-root .palette')) return;
-  const p = el(`<div class="palette"><input type="text" placeholder="Jump to a page or search jobs…" /><div class="palette-list"></div></div>`);
-  const close = openOverlay(p);
-  const input = $('input', p), list = $('.palette-list', p);
-  let jobs = [], items = [], sel = 0;
-  function rebuild() {
-    const q = input.value.trim().toLowerCase();
-    const pages = PAGES.filter((c) => !q || c.label.toLowerCase().includes(q));
-    items = [
-      ...pages.map((c) => ({ label: c.label, hint: 'page', run: () => { location.hash = c.go; } })),
-      ...jobs.map((j) => ({ label: `${j.title || 'Untitled'} — ${j.company || ''}`, hint: j.source || 'job', run: () => { location.hash = '#/applications'; } })),
-    ];
-    sel = Math.min(sel, Math.max(0, items.length - 1));
-    paint();
-  }
-  function paint() {
-    list.replaceChildren();
-    if (!items.length) { list.innerHTML = '<div class="palette-empty">Nothing matches.</div>'; return; }
-    items.forEach((it, i) => {
-      const d = el('<div class="palette-item"><span class="pi-label"></span><span class="pi-hint"></span></div>');
-      $('.pi-label', d).textContent = it.label; $('.pi-hint', d).textContent = it.hint;
-      if (i === sel) d.classList.add('sel');
-      d.addEventListener('click', () => { close(); it.run(); });
-      list.appendChild(d);
-    });
-  }
-  const searchJobs = debounce(async () => {
-    const q = input.value.trim();
-    if (q.length < 2) { jobs = []; rebuild(); return; }
-    try { const r = await api('/jobs?limit=8&q=' + encodeURIComponent(q)); jobs = r.rows || []; } catch { jobs = []; }
-    rebuild();
-  }, 220);
-  input.addEventListener('input', () => { sel = 0; rebuild(); searchJobs(); });
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(sel + 1, items.length - 1); paint(); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(sel - 1, 0); paint(); }
-    else if (e.key === 'Enter') { e.preventDefault(); const it = items[sel]; if (it) { close(); it.run(); } }
-  });
-  rebuild(); input.focus();
+const CHORD_ROUTE = {}; NAV.forEach((g) => g.items.forEach((i) => { CHORD_ROUTE[i.chord] = i.route; }));
+const ROUTE_CRUMB = {};
+NAV.forEach((g) => g.items.forEach((i) => { ROUTE_CRUMB[i.route] = `${g.group} &nbsp;/&nbsp; <b>${i.label}</b>`; }));
+
+function renderShell() {
+  $('#brand').innerHTML = `${signet(44)}<div class="wordmark"><div class="wm-1">JAT<sup>&nbsp;13</sup></div><div class="wm-2">Atelier</div></div>`;
+  const nav = $('#nav');
+  nav.innerHTML = NAV.map((g) => `
+    <div class="nav-h">${g.group}</div>
+    ${g.items.map((i) => `
+      <a class="nav-item" data-route="${i.route}" href="#${i.route}">
+        ${icon(i.icon, 16)}<span class="grow">${i.label}</span>
+        ${i.badge ? `<span class="nav-badge" id="nav-badge-needs"></span>` : `<span class="key">G&thinsp;${i.chord}</span>`}
+      </a>`).join('')}
+  `).join('');
+  $('#user-avatar').textContent = initials(state.profileName);
+  $('#user-name').textContent = state.profileName;
+  $('#cmd-open').addEventListener('click', openPalette);
+  $('#apply-toggle').addEventListener('click', () => toggleApplying());
+  $('#gmail-chip').addEventListener('click', () => go('/settings'));
 }
 
-// ===========================================================================
-// runtime status dot + needs-you badge (polled)
-// ===========================================================================
-async function paintRuntime() {
-  const dot = $('#runtime-dot'), txt = $('#runtime-text');
-  try {
-    const h = await health();
-    state.online = true;
-    if (h.version) { state.version = h.version; const bv = $('#brand-version'); if (bv) bv.textContent = 'v' + h.version; }
-    if (dot) dot.className = 'status-dot online';
-    if (txt) txt.textContent = 'Connected';
-  } catch {
-    state.online = false;
-    if (dot) dot.className = 'status-dot';
-    if (txt) txt.textContent = 'Offline';
-  }
-  if (state.token) {
+function setActiveNav(route) {
+  $$('#nav .nav-item').forEach((a) => a.classList.toggle('active', a.getAttribute('data-route') === route));
+  $('#crumb').innerHTML = ROUTE_CRUMB[route] || ROUTE_CRUMB['/'];
+}
+
+// --- global status poller (never cleared; keeps the resident engine block live) ---
+function startGlobalPoller() {
+  const tickSummary = async () => {
     try {
       const s = await api('/summary');
-      state.needsYou = s.needsYou || 0;
       state.applying = !!s.applying;
-      paintNeedsBadge();
-    } catch { /* ignore */ }
+      state.needsYou = s.needsYou || 0;
+      const inflight = ACTIVE_STATES.reduce((n, st) => n + (s.runs?.byState?.[st] || 0), 0);
+      const queued = s.runs?.byState?.queued || 0;
+      updateEngineChip(inflight, queued);
+      updateNeedsBadge(state.needsYou);
+      updateApplyToggle();
+    } catch (e) { if (e?.status === 401) { state.online = false; updateEngineChip(0, 0, true); } }
+  };
+  const tickHealth = async () => {
+    try { const h = await health(); state.online = true; state.version = h.version || state.version; setEngineDot(true); }
+    catch { state.online = false; setEngineDot(false); }
+  };
+  const tickGmail = async () => {
+    try { const g = await api('/gmail/status'); state.gmail = g; updateGmailChip(g); }
+    catch { /* gmail optional */ }
+  };
+  tickHealth(); tickSummary(); tickGmail();
+  setInterval(tickHealth, 10000);
+  setInterval(tickSummary, 4000);
+  setInterval(tickGmail, 30000);
+}
+function setEngineDot(ok) { const d = $('#engine-dot'); if (!d) return; d.className = 'dot ' + (ok ? (state.applying ? 'live' : 'sage') : 'danger'); }
+function updateEngineChip(inflight, queued, offline) {
+  const chip = $('#engine-chip'), t1 = $('#engine-t1'), t2 = $('#engine-t2');
+  if (!chip) return;
+  if (offline || !state.online) { chip.classList.add('off'); t1.textContent = 'Not connected'; t2.textContent = 'loopback unreachable'; setEngineDot(false); return; }
+  const running = state.applying;
+  chip.classList.toggle('off', !running);
+  t1.textContent = running ? 'Engine running' : 'Engine idle';
+  t2.textContent = `${inflight} in flight · ${queued} queued`;
+  setEngineDot(true);
+}
+function updateNeedsBadge(n) { const b = $('#nav-badge-needs'); if (b) b.textContent = n > 0 ? String(n) : ''; }
+function updateApplyToggle() {
+  const t = $('#apply-toggle'); if (!t) return;
+  t.disabled = !state.online;
+  t.classList.toggle('on', state.applying);
+  t.innerHTML = `Auto-Apply ${state.applying ? 'On' : 'Off'} <span class="knob"></span>`;
+}
+function updateGmailChip(g) {
+  const chip = $('#gmail-chip'); if (!chip) return;
+  const acct = g?.accounts?.[0];
+  if (!acct) { chip.classList.add('hidden'); return; }
+  chip.classList.remove('hidden');
+  const ok = acct.tokenState === 'ok' || acct.tokenState === 'valid' || acct.enabled;
+  chip.innerHTML = `${icon('mail', 13)}<span class="dot ${ok ? 'sage' : 'ember'}" style="width:6px;height:6px"></span> Gmail ${ok ? 'connected' : (acct.tokenState || 'idle')}${acct.lastOkAt ? ` <span class="mono">${fmtAgo(acct.lastOkAt)} ago</span>` : ''}`;
+}
+
+async function toggleApplying(force) {
+  const want = force !== undefined ? force : !state.applying;
+  try {
+    await api(want ? '/apply/start' : '/apply/stop', { method: 'POST' });
+    state.applying = want; updateApplyToggle(); setEngineDot(true);
+    toast(want ? 'Auto-apply started' : 'Auto-apply paused', want ? 'success' : 'info', 2500);
+  } catch (e) { errToast(e, 'Auto-apply'); }
+}
+
+// ============================================================================
+// ROUTER
+// ============================================================================
+function parseHash() {
+  const raw = (location.hash || '#/').slice(1);
+  const [path, qs] = raw.split('?');
+  const query = {};
+  if (qs) new URLSearchParams(qs).forEach((v, k) => { query[k] = v; });
+  return { path: path || '/', query };
+}
+function go(path) { location.hash = path; }
+
+const ROUTES = {
+  '/': renderHome, '/auto': renderAuto, '/needs': renderNeeds, '/pipeline': renderPipeline,
+  '/applications': renderApplications, '/inbox': renderInbox, '/profile': renderProfile,
+  '/documents': renderDocuments, '/activity': renderActivity, '/settings': renderSettings,
+};
+
+function router() {
+  resetPage();
+  const { path, query } = parseHash();
+  const view = $('#view');
+  view.scrollTop = 0;
+  const fn = ROUTES[path] || renderHome;
+  setActiveNav(ROUTES[path] ? path : '/');
+  view.innerHTML = '';
+  try { fn(view, query); } catch (e) { console.error(e); view.innerHTML = ''; view.appendChild(centerState('Something went wrong', e?.message || 'render error')); }
+}
+
+// ---------------------------------------------------------------------------
+// shared UI fragments
+// ---------------------------------------------------------------------------
+function centerState(title, sub, actionHtml) {
+  return el(`<div class="center-state">${signet(72)}<h2>${esc(title)}</h2><p>${esc(sub || '')}</p>${actionHtml || ''}</div>`);
+}
+function loadingRow(label = 'Loading…') { return `<div class="loading-row"><span class="spinner"></span>${esc(label)}</div>`; }
+function showNotConnected() {
+  const view = $('#view'); if (!view) return;
+  view.innerHTML = '';
+  const node = centerState('Not connected', 'The JAT 13 engine is not answering on the loopback port. Make sure the desktop app is running, then retry.', '<button class="btn primary" id="retry-conn">Retry connection</button>');
+  view.appendChild(node);
+  $('#retry-conn')?.addEventListener('click', async () => { const ok = await bootstrap(); if (ok) { state.online = true; router(); } else toast('Still unreachable', 'danger'); });
+}
+function pageHead(title, { serif, date, live, sub } = {}) {
+  return `<div class="page-head">
+    <h1>${serif ? `<span class="serif">${esc(title)}</span>` : esc(title)}</h1>
+    ${date ? `<span class="date">${esc(date)}</span>` : ''}
+    ${sub ? `<span class="sub">${sub}</span>` : ''}
+    ${live ? `<span class="live"><span class="dot live"></span> ${esc(live)}</span>` : ''}
+  </div>`;
+}
+function todayLabel() { return new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }); }
+
+// ============================================================================
+// COMMAND CENTER (home)
+// ============================================================================
+function renderHome(view) {
+  const pad = el(`<div class="view-pad">
+    ${pageHead('Command Center', { date: todayLabel(), live: 'live' })}
+    <div class="stats" id="home-stats">${homeStatsSkeleton()}</div>
+    <div class="grid">
+      <div class="card col-flex span-8 hoverable" id="theatre-card">
+        <div class="card-h"><span class="cap">Auto-Apply</span><span class="pill off" id="theatre-pill">Idle</span><div class="spacer"></div>
+          <button class="btn sm" id="theatre-toggle">Start</button>
+          <button class="btn sm" id="theatre-config">Configure</button></div>
+        <div id="theatre-body">${loadingRow('Reading the engine…')}</div>
+        <div class="runs-foot" id="theatre-foot"></div>
+      </div>
+      <div class="card col-flex span-4 hoverable" id="gauge-card">
+        <div class="card-h"><span class="cap">Today's pacing</span><div class="spacer"></div><span class="aside" id="gauge-pct">—</span></div>
+        <div id="gauge-body">${loadingRow('Pacing…')}</div>
+      </div>
+      <div class="card col-flex span-7 hoverable" id="activity-card">
+        <div class="card-h"><span class="cap">Activity</span><div class="spacer"></div><span class="aside">recent</span></div>
+        <div id="home-activity">${loadingRow()}</div>
+      </div>
+      <div class="card col-flex span-5 hoverable" id="needs-card">
+        <div class="card-h"><span class="cap">Needs you</span><span class="nav-badge" id="needs-mini"></span><div class="spacer"></div>
+          <button class="btn sm" id="needs-open">Open queue</button></div>
+        <div id="home-needs">${loadingRow()}</div>
+      </div>
+    </div>
+  </div>`);
+  view.appendChild(pad);
+
+  $('#theatre-toggle').addEventListener('click', () => toggleApplying());
+  $('#theatre-config').addEventListener('click', () => go('/settings'));
+  $('#needs-open').addEventListener('click', () => go('/needs'));
+
+  // stats + activity + needs + gauge: slower cadence (12s); theatre: 2s.
+  poll(12000, async () => {
+    const [stats, ev, needs] = await Promise.all([
+      api('/stats', { signal: psig() }).catch(() => null),
+      api('/events/recent?limit=14', { signal: psig() }).catch(() => ({ rows: [] })),
+      api('/needs-you', { signal: psig() }).catch(() => ({ needsHuman: [], readyForReview: [] })),
+    ]);
+    if (stats) renderHomeStats(stats);
+    renderHomeActivity(ev.rows || []);
+    renderHomeNeeds([...(needs.needsHuman || []), ...(needs.readyForReview || [])]);
+  });
+  poll(15000, async () => { await renderGauge(); });
+  poll(2000, async () => { await tickTheatre(); });
+}
+function homeStatsSkeleton() {
+  return ['Jobs', 'Applied', 'Interviews', 'Offers'].map((l) => `<div class="stat"><div class="lbl">${l}</div><div class="num">—</div><div class="delta">&nbsp;</div></div>`).join('');
+}
+function renderHomeStats(s) {
+  const f = s.funnel || {}; const totals = s.totals || {};
+  const applied = STATUS_ORDER.filter((x) => x !== 'tracked').reduce((n, x) => n + (f[x] || 0), 0);
+  const interviews = (f.interview_1 || 0) + (f.interview_2 || 0) + (f.interview_final || 0);
+  const offers = (f.offer || 0) + (f.hired || 0);
+  const cards = [
+    { l: 'Jobs', n: num(totals.jobs), d: `${num(totals.applications)} applications on file` },
+    { l: 'Applied', n: num(applied), d: `<b>${num(totals.submitted7d || 0)}</b> submitted · last 7 days` },
+    { l: 'Interviews', n: num(interviews), d: interviews ? `${num(f.interview_final || 0)} at final round` : 'none active' },
+    { l: 'Offers', n: num(offers), d: offers ? `<b>${num(f.hired || 0)}</b> hired` : 'none yet' },
+  ];
+  $('#home-stats').innerHTML = cards.map((c) => `<div class="stat"><div class="lbl">${c.l}</div><div class="num tnum">${c.n}</div><div class="delta">${c.d}</div></div>`).join('');
+}
+function renderHomeActivity(rows) {
+  const box = $('#home-activity'); if (!box) return;
+  if (!rows.length) { box.innerHTML = `<div class="empty">No activity recorded yet.</div>`; return; }
+  box.innerHTML = rows.slice(0, 12).map((e) => activityRow(e)).join('');
+}
+function activityRow(e) {
+  const label = { status_change: 'Status', submitted: 'Applied', park: 'Parked', email_matched: 'Email', created: 'Found', imported: 'Imported', note: 'Note', document_attached: 'Document' }[e.kind] || e.kind;
+  const dotByKind = { submitted: 'bronze', status_change: 'gold', park: 'ember', email_matched: 'sage', created: 'dim', imported: 'dim', note: 'dim', document_attached: 'bronze' };
+  return `<div class="act">
+    <span class="time">${fmtTime(e.at)}</span>
+    <span class="atag ${esc(e.kind)}"><span class="dot ${dotByKind[e.kind] || 'dim'}"></span>${esc(label)}</span>
+    <span class="txt">${esc(e.summary || '(no detail)')}</span>
+    <span class="via">${esc(e.source || e.kind || '')}</span>
+  </div>`;
+}
+function renderHomeNeeds(runs) {
+  const box = $('#home-needs'); const mini = $('#needs-mini');
+  if (mini) mini.textContent = runs.length ? String(runs.length) : '';
+  if (!box) return;
+  if (!runs.length) { box.innerHTML = `<div class="empty">Nothing needs you right now.</div>`; return; }
+  box.innerHTML = runs.slice(0, 5).map((r) => {
+    const answerable = ANSWERABLE_PARK.has(r.park_kind) || r.state === 'ready_for_review';
+    const cls = answerable ? 'q' : 'c';
+    const kind = r.state === 'ready_for_review' ? 'Ready for review' : (PARK_LABEL[r.park_kind] || 'Needs attention');
+    const j = jobKnown(r.job_id);
+    const title = j ? `${esc(j.title)}${j.company ? ` <span>— ${esc(j.company)}</span>` : ''}` : `<span data-jf="${r.job_id}">Loading role…</span>`;
+    if (!j) ensureJob(r.job_id, (job) => { const n = $(`#home-needs [data-jf="${r.job_id}"]`); if (n) n.outerHTML = `${esc(job.title)}${job.company ? ` <span style="color:var(--ink-dim);font-weight:400">— ${esc(job.company)}</span>` : ''}`; });
+    return `<div class="need" data-runid="${r.id}">
+      <div class="glyph ${cls}">${icon(answerable ? 'question' : 'shield', 17)}</div>
+      <div class="body"><div class="t">${kind}</div><div class="s">${title}</div></div>
+      <span class="age">${fmtAgo(r.updated_at)}</span>
+    </div>`;
+  }).join('');
+  $$('#home-needs .need').forEach((n) => n.addEventListener('click', () => go('/needs')));
+}
+
+// --- theatre + gauge (poll active runs) ---
+let theatreCache = [];
+async function tickTheatre() {
+  let data;
+  try { data = await api('/runs?limit=60', { signal: psig() }); } catch (e) { if (e?.aborted) return; throw e; }
+  const rows = data.rows || [];
+  const active = rows.filter((r) => ACTIVE_STATES.includes(r.state)).slice(0, 6);
+  theatreCache = active;
+  const pill = $('#theatre-pill'); const toggle = $('#theatre-toggle');
+  if (pill) { pill.className = 'pill ' + (state.applying ? 'on' : 'off'); pill.innerHTML = state.applying ? `<span class="dot live"></span>On · ${active.length} in flight` : 'Idle'; }
+  if (toggle) toggle.textContent = state.applying ? 'Pause' : 'Start';
+  const body = $('#theatre-body');
+  if (!body) return;
+  if (!active.length) {
+    body.innerHTML = `<div class="empty">${state.applying ? 'No runs in flight this moment — the scheduler is between leases.' : 'Auto-apply is idle. Start it to watch runs stream here.'}</div>`;
+  } else {
+    body.innerHTML = active.map((r, i) => runTheatreRow(r, i)).join('');
+    active.forEach((r) => { if (!jobKnown(r.job_id)) ensureJob(r.job_id, () => patchTheatreTitle(r)); else patchTheatreTitle(r); });
   }
+  // foot stats from a light stats read (throttled: only every ~6s via modulo)
+  renderTheatreFoot(rows);
 }
-function paintNeedsBadge() {
-  const nav = document.querySelector('.nav-item[data-route="/queue"]');
-  if (!nav) return;
-  let badge = nav.querySelector('.nav-badge');
-  if (state.needsYou > 0) {
-    if (!badge) { badge = el('<span class="nav-badge pill warn"></span>'); nav.appendChild(badge); }
-    badge.textContent = state.needsYou;
-  } else if (badge) badge.remove();
+function runTheatreRow(r, i) {
+  const rs = RUN_STATE[r.state] || { label: r.state, pct: 40 };
+  const j = jobKnown(r.job_id);
+  const title = j ? `${esc(j.title)}${j.company ? ` <span>— ${esc(j.company)}</span>` : ''}` : `Run ${r.id.slice(-6)}`;
+  return `<div class="run" data-runid="${r.id}">
+    <span class="idx">${String(i + 1).padStart(2, '0')}</span>
+    <div class="who">
+      <div class="title" data-jt="${r.job_id}">${title}</div>
+      <div class="rstage">${srcTag(r.source)} ${esc(rs.label)}${r.route ? ` · ${esc(String(r.route).replace(/_/g, ' '))}` : ''}${r.steps_count ? ` · ${r.steps_count} steps` : ''}</div>
+    </div>
+    <div class="prog"><span class="pct tnum">${rs.pct}%</span><div class="bar"><i style="width:${rs.pct}%"></i></div></div>
+  </div>`;
+}
+function patchTheatreTitle(r) {
+  const j = jobKnown(r.job_id); if (!j) return;
+  const n = $(`#theatre-body [data-jt="${r.job_id}"]`);
+  if (n) n.innerHTML = `${esc(j.title)}${j.company ? ` <span>— ${esc(j.company)}</span>` : ''}`;
+}
+function renderTheatreFoot(rows) {
+  const foot = $('#theatre-foot'); if (!foot) return;
+  const now = Date.now(); const hourAgo = now - 3600000;
+  const submittedHr = rows.filter((r) => r.state === 'submitted' && (r.finished_at || 0) >= hourAgo).length;
+  const failedHr = rows.filter((r) => r.state === 'failed' && (r.finished_at || 0) >= hourAgo).length;
+  const queued = rows.filter((r) => r.state === 'queued').length;
+  foot.innerHTML = `<span>queue <b>${queued}</b> waiting</span><span><b>${submittedHr}</b> submitted this hour</span><span class="end"><b>${failedHr}</b> failed this hour</span>`;
+}
+async function renderGauge() {
+  let rows = [];
+  try { rows = (await api('/runs?state=submitted&limit=300', { signal: psig() })).rows || []; } catch (e) { if (e?.aborted) return; }
+  const start = new Date(); start.setHours(0, 0, 0, 0); const t0 = start.getTime();
+  const today = rows.filter((r) => (r.finished_at || r.updated_at || 0) >= t0);
+  const byLane = { linkedin: 0, indeed: 0, ats: 0 };
+  today.forEach((r) => { const lane = r.lane === 'linkedin' ? 'linkedin' : r.lane === 'indeed' ? 'indeed' : 'ats'; byLane[lane]++; });
+  const caps = { linkedin: 45, indeed: 20, ats: 40 };
+  const frac = clamp(byLane.linkedin / caps.linkedin, 0, 1);
+  const full = Math.PI * 90; // semicircle arc length
+  const dash = (frac * full).toFixed(1);
+  const body = $('#gauge-body'); const pctEl = $('#gauge-pct');
+  if (pctEl) pctEl.textContent = `${Math.round(frac * 100)}%`;
+  if (!body) return;
+  const resetIn = (() => { const midnight = new Date(); midnight.setHours(24, 0, 0, 0); const ms = midnight - Date.now(); const h = Math.floor(ms / 3600000); const m = Math.floor((ms % 3600000) / 60000); return `${h}h ${m}m`; })();
+  body.innerHTML = `
+    <div class="gauge-wrap">
+      <svg width="220" height="118" viewBox="0 0 220 118">
+        <path d="M20 108 A 90 90 0 0 1 200 108" fill="none" stroke="rgba(236,228,212,.08)" stroke-width="9" stroke-linecap="round"/>
+        <path d="M20 108 A 90 90 0 0 1 200 108" fill="none" stroke="url(#gaugeGrad)" stroke-width="9" stroke-linecap="round" stroke-dasharray="${dash} 999" style="filter:drop-shadow(0 0 6px rgba(201,163,115,.4))"/>
+      </svg>
+      <div class="gauge-center"><div class="big tnum">${byLane.linkedin}<span> / ${caps.linkedin}</span></div><div class="sub">LinkedIn daily cap</div></div>
+    </div>
+    <div class="gauge-foot">
+      ${miniMeter('Indeed', byLane.indeed, caps.indeed)}
+      ${miniMeter('Direct ATS', byLane.ats, caps.ats)}
+    </div>
+    <div class="gauge-reset">caps reset in ${resetIn} · 00:00 local</div>`;
+}
+function miniMeter(label, v, cap) {
+  const w = clamp((v / cap) * 100, 0, 100);
+  return `<div class="mini-meter"><span class="src">${esc(label)}</span><span class="bar"><i style="width:${w}%"></i></span><span class="v tnum">${v} / ${cap}</span></div>`;
 }
 
-// ===========================================================================
-// boot
-// ===========================================================================
-async function boot() {
-  try { applyTheme(localStorage.getItem(LS_THEME) || DEFAULT_THEME); } catch {}
-  await bootstrap();
-  const bv = $('#brand-version'); if (bv && state.version) bv.textContent = 'v' + state.version;
+// ============================================================================
+// APPLICATIONS — virtualized (handles 4,500+ rows without freezing)
+// ============================================================================
+const ROW_H = 58;
+function renderApplications(view, query) {
+  const pad = el(`<div class="view-pad">
+    ${pageHead('Applications', { live: '' })}
+    <div class="toolbar">
+      <div class="search-box">${icon('search', 14)}<input id="app-search" placeholder="Filter loaded rows by title, company, status…" autocomplete="off"></div>
+      <div class="seg" id="app-status-seg"></div>
+    </div>
+    <div class="list-frame" style="height:calc(100vh - 240px); min-height:360px;">
+      <div class="list-head"><span>Status</span><span>Role</span><span>Next / detail</span><span>Via</span><span>Updated</span></div>
+      <div class="vlist" id="vlist" style="flex:1;"><div class="vlist-sizer" id="vsizer"></div></div>
+      <div class="list-status" id="list-status"></div>
+    </div>
+  </div>`);
+  view.appendChild(pad);
 
-  if (state.token) {
+  const STATUSES = [['', 'All'], ...STATUS_ORDER.map((s) => [s, STATUS_LABEL[s]])];
+  const seg = $('#app-status-seg');
+  const activeStatus = query.status || '';
+  // compact the segmented control to the meaningful ones + All to avoid overflow
+  const shown = [['', 'All'], ['tracked', 'Saved'], ['submitted', 'Applied'], ['acknowledged', 'Acknowledged'], ['assessment', 'Assessment'], ['interview_1', 'Interview'], ['offer', 'Offer'], ['rejected', 'Rejected']];
+  seg.innerHTML = shown.map(([v, l]) => `<span data-status="${v}" class="${v === activeStatus ? 'on' : ''}">${l}</span>`).join('');
+  seg.addEventListener('click', (e) => { const s = e.target.closest('span[data-status]'); if (!s) return; const v = s.getAttribute('data-status'); go(v ? `/applications?status=${v}` : '/applications'); });
+
+  const vlist = $('#vlist'); const sizer = $('#vsizer'); const statusBar = $('#list-status');
+
+  // virtualization model
+  const model = { total: 0, status: activeStatus, pageSize: 120, pages: new Map(), pending: new Set(), search: '' };
+  let rafPending = false;
+
+  function pageFor(i) { return Math.floor(i / model.pageSize); }
+  function rowAt(i) { const p = model.pages.get(pageFor(i)); if (!p) return undefined; return p[i % model.pageSize]; }
+  async function loadPage(pi) {
+    if (model.pages.has(pi) || model.pending.has(pi)) return;
+    model.pending.add(pi);
     try {
-      const s = await api('/settings');
-      state.settings = s;
-      const t = s.appearance?.themeId;
-      if (t) { applyTheme(t); try { localStorage.setItem(LS_THEME, t); } catch {} }
-    } catch { /* ignore */ }
+      const q = new URLSearchParams({ limit: String(model.pageSize), offset: String(pi * model.pageSize) });
+      if (model.status) q.set('status', model.status);
+      const data = await api(`/applications?${q}`, { signal: psig() });
+      model.total = data.total || 0; model.pages.set(pi, data.rows || []);
+      sizer.style.height = `${model.total * ROW_H}px`;
+      scheduleRender();
+      updateStatusBar();
+    } catch (e) { if (!e?.aborted) { /* leave placeholders */ } }
+    finally { model.pending.delete(pi); }
+  }
+  function updateStatusBar() {
+    const loaded = [...model.pages.values()].reduce((n, a) => n + a.length, 0);
+    statusBar.innerHTML = `<span>${num(model.total)} applications${model.status ? ` · ${STATUS_LABEL[model.status]}` : ''}</span><span>${num(loaded)} loaded</span>${model.search ? `<span>filtering “${esc(model.search)}”</span>` : ''}`;
   }
 
-  paintRuntime();
-  if (state.pollTimer) clearInterval(state.pollTimer);
-  state.pollTimer = setInterval(paintRuntime, 15000);
-  navigate();
+  function scheduleRender() { if (rafPending) return; rafPending = true; requestAnimationFrame(renderWindow); }
+  function renderWindow() {
+    rafPending = false;
+    if (state.routeGen !== gen) return;
+    if (model.search) return renderSearch();
+    const scrollTop = vlist.scrollTop; const vh = vlist.clientHeight;
+    const first = Math.max(0, Math.floor(scrollTop / ROW_H) - 6);
+    const last = Math.min(model.total, Math.ceil((scrollTop + vh) / ROW_H) + 6);
+    // ensure covering pages are loaded
+    for (let pi = pageFor(first); pi <= pageFor(Math.max(first, last - 1)); pi++) loadPage(pi);
+    const frag = document.createDocumentFragment();
+    for (let i = first; i < last; i++) {
+      const row = rowAt(i);
+      frag.appendChild(buildRow(i, row));
+    }
+    // replace rows (keep sizer)
+    $$('.vrow', sizer).forEach((n) => n.remove());
+    sizer.appendChild(frag);
+  }
+  function buildRow(i, row) {
+    const n = el(`<div class="vrow" style="top:${i * ROW_H}px; height:${ROW_H}px"></div>`);
+    if (!row) {
+      n.innerHTML = `<div class="r-status"><span class="dot dim"></span><span class="skelbar" style="width:60px"></span></div><div class="r-title"><span class="skelbar" style="width:70%"></span></div><div class="r-meta"></div><div class="r-via"></div><div class="r-date"></div>`;
+      return n;
+    }
+    const j = jobKnown(row.job_id);
+    const titleHtml = j ? `<div class="t">${esc(j.title)}</div><div class="c">${esc(j.company || j.location || '')}</div>` : `<div class="t skel"><span class="skelbar" style="width:60%"></span></div><div class="c skel"><span class="skelbar" style="width:40%"></span></div>`;
+    n.innerHTML = `
+      <div class="r-status">${statusBadge(row.status)}</div>
+      <div class="r-title" data-jrow="${row.job_id}">${titleHtml}</div>
+      <div class="r-meta">${row.needs_review ? `<span class="needs-flag">Needs review</span>` : esc(row.next_action || (row.due_at ? `Due ${fmtDate(row.due_at)}` : '—'))}</div>
+      <div class="r-via">${esc(row.via || '')}</div>
+      <div class="r-date tnum">${fmtAgo(row.updated_at)}</div>`;
+    n.addEventListener('click', () => openTimelineDrawer(row));
+    if (!j) ensureJob(row.job_id, (job) => { const cell = $(`.r-title[data-jrow="${row.job_id}"]`, sizer); if (cell) cell.innerHTML = `<div class="t">${esc(job.title)}</div><div class="c">${esc(job.company || job.location || '')}</div>`; });
+    return n;
+  }
+  function renderSearch() {
+    // filter LOADED rows only (applications have no server text search); capped, honest.
+    const q = model.search.toLowerCase();
+    const all = [];
+    for (const [, arr] of model.pages) for (const r of arr) all.push(r);
+    const matched = all.filter((r) => {
+      const j = jobKnown(r.job_id);
+      const hay = `${STATUS_LABEL[r.status]} ${r.via || ''} ${j ? j.title + ' ' + j.company : ''}`.toLowerCase();
+      return hay.includes(q);
+    }).slice(0, 300);
+    sizer.style.height = `${matched.length * ROW_H}px`;
+    $$('.vrow', sizer).forEach((n) => n.remove());
+    const frag = document.createDocumentFragment();
+    matched.forEach((r, idx) => frag.appendChild(buildRow(idx, r)));
+    sizer.appendChild(frag);
+    if (!matched.length) { const e = el(`<div class="vrow" style="top:0;height:${ROW_H}px"><div class="r-meta" style="grid-column:1/-1;color:var(--ink-faint)">No matches in loaded rows — scroll the full list to load more, or clear the filter.</div></div>`); sizer.appendChild(e); }
+  }
+
+  const gen = state.routeGen;
+  vlist.addEventListener('scroll', scheduleRender, { passive: true });
+  $('#app-search').addEventListener('input', debounce((e) => { model.search = e.target.value.trim(); if (!model.search) { sizer.style.height = `${model.total * ROW_H}px`; } renderWindow(); updateStatusBar(); }, 200));
+  loadPage(0);
 }
 
-window.addEventListener('hashchange', navigate);
-document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); return; }
-  if (e.key === 'Escape') { if (closeTopOverlay()) e.preventDefault(); }
-});
-if (!location.hash) location.hash = '#/';
-boot();
+// --- timeline drawer ---
+async function openTimelineDrawer(row) {
+  const j = jobKnown(row.job_id);
+  const node = el(`<div class="drawer">
+    <div class="drawer-h"><div class="dt"><h3 id="dr-title">${j ? esc(j.title) : 'Application'}</h3><div class="dc" id="dr-sub">${j && j.company ? esc(j.company) + ' · ' : ''}${statusBadgeText(row.status)}</div></div><button class="drawer-x">${icon('close', 16)}</button></div>
+    <div class="drawer-body" id="dr-body">${loadingRow('Loading timeline…')}</div>
+  </div>`);
+  const close = openOverlay(node);
+  node.querySelector('.drawer-x').addEventListener('click', close);
+  if (!j) ensureJob(row.job_id, (job) => { const t = $('#dr-title'); if (t) t.textContent = job.title; const s = $('#dr-sub'); if (s) s.innerHTML = `${job.company ? esc(job.company) + ' · ' : ''}${statusBadgeText(row.status)}`; });
+  try {
+    const data = await api(`/applications/${encodeURIComponent(row.id)}/timeline`);
+    const events = data.events?.rows || data.events || [];
+    const emails = data.emails?.rows || data.emails || [];
+    const body = $('#dr-body'); if (!body) return;
+    let html = '';
+    html += `<div class="drawer-sec">Timeline</div>`;
+    if (!events.length) html += `<div class="empty">No events recorded yet.</div>`;
+    else html += `<div class="tl-wrap">${events.map((e) => `<div class="tl"><span class="tdot"></span><div class="th">${esc(e.summary || e.kind)}</div><div class="tm">${esc(e.kind)} · ${fmtDateTime(e.at)}${e.source ? ' · ' + esc(e.source) : ''}</div></div>`).join('')}</div>`;
+    if (emails.length) {
+      html += `<div class="drawer-sec">Matched emails</div>`;
+      html += emails.map((m) => `<div class="mail"><span class="dot sage mdot"></span><div class="mb"><div class="subj">${esc(m.subject || '(no subject)')}</div><div class="from">${esc(m.from_name || m.from_addr || '')}</div>${m.snippet ? `<div class="snip">${esc(m.snippet)}</div>` : ''}</div>${m.category ? `<span class="mcat">${esc(m.category)}</span>` : ''}</div>`).join('');
+    }
+    body.innerHTML = html;
+  } catch (e) { const body = $('#dr-body'); if (body) body.innerHTML = `<div class="empty">Could not load timeline — ${esc(e.message)}</div>`; }
+}
+function statusBadgeText(status) { return `<span class="sbadge"><span class="dot ${STATUS_DOT[status] || 'dim'}"></span>${esc(STATUS_LABEL[status] || status)}</span>`; }
+
+// ============================================================================
+// PIPELINE — kanban of human statuses (counts + first cards + "+N more")
+// ============================================================================
+const PIPE_COLUMNS = ['tracked', 'submitted', 'acknowledged', 'assessment', 'interview_1', 'interview_2', 'interview_final', 'offer', 'hired'];
+const PIPE_TERMINAL = ['rejected', 'withdrawn', 'ghosted'];
+function renderPipeline(view) {
+  const pad = el(`<div class="view-pad">
+    ${pageHead('Pipeline', { sub: 'Human statuses · counts from the 90-day funnel' })}
+    <div class="card" style="padding:20px 22px 8px"><div class="board" id="board">${loadingRow('Building the board…')}</div></div>
+  </div>`);
+  view.appendChild(pad);
+  poll(20000, async () => {
+    const stats = await api('/stats', { signal: psig() });
+    const f = stats.funnel || {};
+    const board = $('#board'); if (!board) return;
+    const cols = [...PIPE_COLUMNS.map((s) => ({ s, count: f[s] || 0 })), ...PIPE_TERMINAL.map((s) => ({ s, count: f[s] || 0, terminal: true }))];
+    board.innerHTML = cols.map((c) => `
+      <div class="col ${c.terminal ? 'terminal' : ''}" data-col="${c.s}">
+        <div class="col-h" data-status="${c.s}"><span class="dot ${STATUS_DOT[c.s]}"></span><span class="nm">${STATUS_LABEL[c.s]}</span><span class="ct tnum">${num(c.count)}</span></div>
+        <div class="col-cards" id="col-${c.s}">${c.count ? loadingRow('') : `<div class="col-empty">empty</div>`}</div>
+      </div>`).join('');
+    $$('#board .col-h').forEach((h) => h.addEventListener('click', () => go(`/applications?status=${h.getAttribute('data-status')}`)));
+    // load a few cards per non-empty column (bounded fetches)
+    cols.filter((c) => c.count > 0).forEach((c) => loadColumnCards(c.s, c.count));
+  });
+}
+async function loadColumnCards(status, count) {
+  try {
+    const data = await api(`/applications?status=${status}&limit=4`, { signal: psig() });
+    const box = $(`#col-${status}`); if (!box) return;
+    const rows = data.rows || [];
+    const shown = rows.length;
+    box.innerHTML = rows.map((r) => pipeCard(r, status)).join('') + (count > shown ? `<div class="more" data-status="${status}">+ ${num(count - shown)} more</div>` : '');
+    box.querySelectorAll('.more').forEach((m) => m.addEventListener('click', () => go(`/applications?status=${status}`)));
+    rows.forEach((r) => { if (!jobKnown(r.job_id)) ensureJob(r.job_id, (j) => patchPipeCard(r, j)); else patchPipeCard(r, jobKnown(r.job_id)); });
+  } catch (e) { if (!e?.aborted) { const box = $(`#col-${status}`); if (box) box.innerHTML = `<div class="col-empty">—</div>`; } }
+}
+function pipeCard(r, status) {
+  const j = jobKnown(r.job_id);
+  const note = r.needs_review ? 'Needs review' : (r.next_action || (r.due_at ? `Due ${fmtDate(r.due_at)}` : ''));
+  return `<div class="job ${status === 'offer' ? 'offer' : ''}" data-appid="${r.id}" data-jc="${r.job_id}">
+    <div class="jt" data-jt2="${r.job_id}">${j ? esc(j.title) : 'Loading…'}</div>
+    <div class="jc">${srcTag(r.via === 'import' ? 'web' : (j?.source || ''))} <span data-jco="${r.job_id}">${j ? esc(j.company || '') : ''}</span></div>
+    <div class="jf"><span class="ago">${fmtAgo(r.updated_at)}</span>${note ? `<span class="note">${esc(note)}</span>` : ''}</div>
+  </div>`;
+}
+function patchPipeCard(r, j) {
+  if (!j) return;
+  const t = $(`[data-jt2="${r.job_id}"]`); if (t) t.textContent = j.title;
+  const co = $(`[data-jco="${r.job_id}"]`); if (co) co.textContent = j.company || '';
+}
+
+// ============================================================================
+// AUTO-APPLY (mission control) + NEEDS YOU (shared queue)
+// ============================================================================
+function renderAuto(view) {
+  const pad = el(`<div class="view-pad">
+    ${pageHead('Auto-Apply', { sub: 'Mission control — the engine, its live runs, and everything it needs from you' })}
+    <div class="card" style="padding:18px 22px">
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <button class="btn ${state.applying ? '' : 'primary'}" id="auto-onoff">${state.applying ? 'Pause auto-apply' : 'Start auto-apply'}</button>
+        <span class="pill ${state.applying ? 'on' : 'off'}" id="auto-pill">${state.applying ? '<span class="dot live"></span>Running' : 'Idle'}</span>
+        <div class="spacer" style="flex:1"></div>
+        <button class="btn sm" id="auto-config">Configure caps & keywords</button>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="card col-flex span-7 hoverable"><div class="card-h"><span class="cap">Live runs</span><div class="spacer"></div><span class="aside" id="auto-live-n">—</span></div><div id="auto-live">${loadingRow()}</div></div>
+      <div class="card col-flex span-5 hoverable"><div class="card-h"><span class="cap">Needs you</span><span class="nav-badge" id="auto-needs-n"></span><div class="spacer"></div></div><div id="auto-queue">${loadingRow()}</div></div>
+    </div>
+    <div class="card col-flex hoverable"><div class="card-h"><span class="cap">History</span><div class="spacer"></div><span class="aside">last 100 finished runs</span></div><div id="auto-history">${loadingRow()}</div></div>
+  </div>`);
+  view.appendChild(pad);
+  $('#auto-onoff').addEventListener('click', async () => { await toggleApplying(); const b = $('#auto-onoff'); if (b) b.textContent = state.applying ? 'Pause auto-apply' : 'Start auto-apply'; const p = $('#auto-pill'); if (p) { p.className = 'pill ' + (state.applying ? 'on' : 'off'); p.innerHTML = state.applying ? '<span class="dot live"></span>Running' : 'Idle'; } });
+  $('#auto-config').addEventListener('click', () => go('/settings'));
+
+  poll(2000, async () => {
+    const data = await api('/runs?limit=60', { signal: psig() });
+    const rows = data.rows || [];
+    const active = rows.filter((r) => ACTIVE_STATES.includes(r.state));
+    $('#auto-live-n').textContent = `${active.length} in flight`;
+    const box = $('#auto-live');
+    if (!active.length) box.innerHTML = `<div class="empty">${state.applying ? 'Between leases — nothing in flight this instant.' : 'Idle. Start the engine to see live runs.'}</div>`;
+    else { box.innerHTML = active.slice(0, 8).map((r, i) => runTheatreRow(r, i)).join(''); active.forEach((r) => { if (!jobKnown(r.job_id)) ensureJob(r.job_id, () => { const n = $(`#auto-live [data-jt="${r.job_id}"]`); const j = jobKnown(r.job_id); if (n && j) n.innerHTML = `${esc(j.title)}${j.company ? ` <span>— ${esc(j.company)}</span>` : ''}`; }); }); }
+  });
+  poll(4000, async () => { await loadQueue('#auto-queue', '#auto-needs-n', 12); });
+  poll(15000, async () => {
+    const data = await api('/runs?limit=100', { signal: psig() });
+    const rows = (data.rows || []).filter((r) => TERMINAL_RUN.has(r.state)).slice(0, 60);
+    const box = $('#auto-history'); if (!box) return;
+    if (!rows.length) { box.innerHTML = `<div class="empty">No finished runs yet.</div>`; return; }
+    box.innerHTML = rows.map((r) => historyRow(r)).join('');
+    rows.forEach((r) => { if (!jobKnown(r.job_id)) ensureJob(r.job_id, () => { const j = jobKnown(r.job_id); const n = $(`#auto-history [data-jh="${r.job_id}"]`); if (n && j) n.textContent = `${j.title}${j.company ? ' — ' + j.company : ''}`; }); });
+  });
+}
+function historyRow(r) {
+  const rs = RUN_STATE[r.state] || { label: r.state };
+  const dot = r.state === 'submitted' ? 'bronze' : r.state === 'parked' ? 'ember' : r.state === 'failed' ? 'danger' : r.state === 'ready_for_review' ? 'gold' : 'dim';
+  const j = jobKnown(r.job_id);
+  return `<div class="act"><span class="time">${fmtTime(r.finished_at || r.updated_at)}</span><span class="atag" style="width:120px"><span class="dot ${dot}"></span>${esc(rs.label)}</span><span class="txt"><b data-jh="${r.job_id}">${j ? esc(j.title + (j.company ? ' — ' + j.company : '')) : 'Run ' + r.id.slice(-6)}</b>${r.park_kind ? ' · ' + esc(PARK_LABEL[r.park_kind] || r.park_kind) : ''}${r.error ? ' · ' + esc(String(r.error).slice(0, 60)) : ''}</span><span class="via">${srcTag(r.source)}</span></div>`;
+}
+
+function renderNeeds(view) {
+  const pad = el(`<div class="view-pad">
+    ${pageHead('Needs You', { sub: 'Runs parked waiting on a human — answer screening questions, clear reviews' })}
+    <div class="card col-flex"><div class="card-h"><span class="cap">Queue</span><span class="nav-badge" id="needs-n"></span><div class="spacer"></div><button class="btn sm" id="needs-refresh">${icon('refresh', 13)} Refresh</button></div><div id="needs-queue">${loadingRow()}</div></div>
+  </div>`);
+  view.appendChild(pad);
+  $('#needs-refresh').addEventListener('click', () => loadQueue('#needs-queue', '#needs-n', 40));
+  poll(5000, async () => { await loadQueue('#needs-queue', '#needs-n', 40); });
+}
+
+// shared queue loader (capped render + "N more"; expandable answer form)
+async function loadQueue(boxSel, countSel, cap) {
+  const data = await api('/needs-you', { signal: psig() });
+  const human = data.needsHuman || []; const review = data.readyForReview || [];
+  const all = [...human, ...review];
+  const cEl = countSel ? $(countSel) : null; if (cEl) cEl.textContent = all.length ? String(all.length) : '';
+  const box = $(boxSel); if (!box) return;
+  if (!all.length) { box.innerHTML = `<div class="empty">The queue is clear. Nothing needs you.</div>`; return; }
+  const shown = all.slice(0, cap);
+  box.innerHTML = shown.map((r) => queueItem(r)).join('') + (all.length > shown.length ? `<div class="card-foot"><span>${num(all.length - shown.length)} more waiting — resolve these first</span></div>` : '');
+  shown.forEach((r) => {
+    if (!jobKnown(r.job_id)) ensureJob(r.job_id, () => { const j = jobKnown(r.job_id); const n = $(`${boxSel} [data-qt="${r.id}"]`); if (n && j) n.innerHTML = `${esc(j.title)}${j.company ? ` <span>— ${esc(j.company)}</span>` : ''}`; });
+  });
+  $$(`${boxSel} .queue-row`).forEach((rowEl) => rowEl.addEventListener('click', () => toggleAnswerForm(rowEl, boxSel)));
+}
+function queueItem(r) {
+  const review = r.state === 'ready_for_review';
+  const answerable = review || ANSWERABLE_PARK.has(r.park_kind);
+  const kind = review ? 'Ready for review' : (PARK_LABEL[r.park_kind] || 'Needs attention');
+  const j = jobKnown(r.job_id);
+  return `<div class="queue-item" data-runid="${r.id}" data-answerable="${answerable ? 1 : 0}" data-park="${esc(r.park_kind || '')}">
+    <div class="queue-row">
+      <div class="glyph ${answerable ? '' : 'c'}">${icon(answerable ? 'question' : 'shield', 17)}</div>
+      <div class="qb"><div class="qt" data-qt="${r.id}">${j ? `${esc(j.title)}${j.company ? ` <span>— ${esc(j.company)}</span>` : ''}` : 'Loading role…'}</div><div class="qs">${esc(kind)} · ${srcTagText(r.source)} · ${esc(String(r.state).replace(/_/g, ' '))}</div></div>
+      <span class="age">${fmtAgo(r.updated_at)}</span>
+    </div>
+  </div>`;
+}
+function srcTagText(s) { const k = String(s || '').toLowerCase(); return SRC_TAG[k] ? k : (s || 'source'); }
+
+function toggleAnswerForm(rowEl, boxSel) {
+  const item = rowEl.closest('.queue-item');
+  const existing = item.querySelector('.answer-form');
+  if (existing) { existing.remove(); return; }
+  // collapse others
+  $$(`${boxSel} .answer-form`).forEach((f) => f.remove());
+  const runId = item.getAttribute('data-runid');
+  const answerable = item.getAttribute('data-answerable') === '1';
+  const park = item.getAttribute('data-park');
+  const form = el(`<div class="answer-form"><div class="ctx" id="ctx-${runId}">Loading context…</div></div>`);
+  item.appendChild(form);
+  // fetch steps for context (lazy, only on expand)
+  api(`/runs/${encodeURIComponent(runId)}/steps`).then((d) => {
+    const steps = d.steps || []; const last = steps[steps.length - 1];
+    const ctx = $(`#ctx-${runId}`);
+    if (ctx) ctx.textContent = last ? `last step — ${last.phase}${last.action ? ' · ' + last.action : ''}${last.detail ? ' · ' + String(last.detail).slice(0, 80) : ''}` : 'No steps recorded for this run.';
+  }).catch(() => { const ctx = $(`#ctx-${runId}`); if (ctx) ctx.textContent = ''; });
+
+  if (!answerable) {
+    form.insertAdjacentHTML('beforeend', `<div style="font-size:12px;color:var(--ink-dim)">${PARK_LABEL[park] || 'This'} can't be answered from here — it needs you to act in the browser (sign-in / human verification). Per the standing workflow, skip it and let the engine move on.</div>`);
+    return;
+  }
+  form.insertAdjacentHTML('beforeend', `
+    <div class="row2">
+      <div><label class="field-label">Question / field label</label><input class="inp" id="ans-q-${runId}" placeholder="e.g. Years of experience with React"></div>
+    </div>
+    <div class="row2">
+      <div><label class="field-label">Answer</label><input class="inp" id="ans-v-${runId}" placeholder="Your answer — saved to profile memory (locked)"></div>
+      <div style="flex:0 0 120px;min-width:110px"><label class="field-label">Kind</label><select class="inp" id="ans-k-${runId}"><option value="qa">Q&A</option><option value="field">Field</option></select></div>
+    </div>
+    <div style="display:flex;gap:10px;justify-content:flex-end"><button class="btn sm" id="ans-skip-${runId}">Cancel</button><button class="btn sm primary" id="ans-save-${runId}">${icon('check', 13)} Answer & resume</button></div>`);
+  form.querySelector(`#ans-skip-${runId}`).addEventListener('click', () => form.remove());
+  form.querySelector(`#ans-save-${runId}`).addEventListener('click', async () => {
+    const label = form.querySelector(`#ans-q-${runId}`).value.trim();
+    const value = form.querySelector(`#ans-v-${runId}`).value.trim();
+    const kind = form.querySelector(`#ans-k-${runId}`).value;
+    if (!label || !value) { toast('Enter both a question and an answer', 'danger', 3000); return; }
+    if (!state.profileId) { toast('No default profile loaded', 'danger'); return; }
+    try {
+      await api(`/runs/${encodeURIComponent(runId)}/answer`, { method: 'POST', body: { answers: [{ profileId: state.profileId, label, value, kind }] } });
+      toast('Answered — run re-queued', 'success', 3000);
+      item.remove();
+    } catch (e) { errToast(e, 'Answer'); }
+  });
+}
+
+// ============================================================================
+// PROFILE — full-width two columns (identity editor + learned answers)
+// ============================================================================
+const PROFILE_FIELDS = [
+  { key: 'email', label: 'Email', alts: ['email', 'emailAddress'] },
+  { key: 'phone', label: 'Phone', alts: ['phone', 'phoneNumber', 'mobile'], half: true },
+  { key: 'location', label: 'Location', alts: ['location', 'city', 'cityState'], half: true },
+  { key: 'linkedin', label: 'LinkedIn', alts: ['linkedin', 'linkedIn', 'linkedinUrl'] },
+  { key: 'portfolio', label: 'Portfolio / Website', alts: ['portfolio', 'website', 'personalSite'], half: true },
+  { key: 'github', label: 'GitHub', alts: ['github', 'githubUrl'], half: true },
+  { key: 'workAuthorization', label: 'Work authorization', alts: ['workAuthorization', 'work_authorization', 'authorization'] },
+  { key: 'salaryTarget', label: 'Salary target', alts: ['salaryTarget', 'salary', 'salaryExpectation'] },
+];
+function readField(data, alts) { for (const a of alts) { if (data && data[a] != null && data[a] !== '') return data[a]; } return ''; }
+
+async function renderProfile(view) {
+  const pad = el(`<div class="view-pad">
+    ${pageHead('Profile', { sub: 'Used by auto-apply on every source' })}
+    <div class="prof-grid">
+      <div class="card" id="id-card">${loadingRow('Loading profile…')}</div>
+      <div class="card col-flex" id="la-card">
+        <div class="card-h"><span class="cap">Learned answers</span><div class="spacer"></div><span class="aside" id="la-count">—</span></div>
+        <div class="la-sub">Memory the engine learned from your applications. Locked answers are used verbatim and never overwritten.</div>
+        <div class="la-tools"><div class="search-box">${icon('search', 13)}<input id="la-search" placeholder="Filter questions…" autocomplete="off"></div></div>
+        <div id="la-rows">${loadingRow()}</div>
+      </div>
+    </div>
+  </div>`);
+  view.appendChild(pad);
+
+  // load profiles → default
+  let profile;
+  try {
+    const list = await api('/profiles', { signal: psig() });
+    const rows = list.rows || [];
+    const def = rows.find((r) => r.is_default) || rows[0];
+    if (!def) { $('#id-card').innerHTML = `<div class="empty">No profile found.</div>`; return; }
+    state.profileId = def.id; state.profileName = def.name || state.profileName;
+    profile = await api(`/profiles/${encodeURIComponent(def.id)}`, { signal: psig() });
+  } catch (e) { if (!e?.aborted) $('#id-card').innerHTML = `<div class="empty">Could not load profile — ${esc(e.message)}</div>`; return; }
+
+  renderIdentityCard(profile);
+  loadLearnedAnswers('');
+  $('#la-search').addEventListener('input', debounce((e) => loadLearnedAnswers(e.target.value.trim()), 250));
+}
+function renderIdentityCard(profile) {
+  const data = (profile.data && typeof profile.data === 'object') ? profile.data : {};
+  const card = $('#id-card'); if (!card) return;
+  const role = readField(data, ['title', 'role', 'headline']) || 'Applicant';
+  const loc = readField(data, ['location', 'city']) || '';
+  card.innerHTML = `
+    <div class="id-head"><div class="id-avatar">${initials(profile.name)}</div><div><div class="nm">${esc(profile.name || 'Profile')}</div><div class="rl">${esc(role)}${loc ? ' · ' + esc(loc) : ''}</div></div></div>
+    <div class="fields" id="id-fields">
+      <div class="field"><label class="field-label">Full name</label><input class="inp" data-pf="__name" value="${esc(profile.name || '')}"></div>
+      ${renderFieldRows(data)}
+    </div>
+    <div class="id-actions"><button class="btn primary" id="prof-save">${icon('check', 13)} Save changes</button><button class="btn" id="prof-export">${icon('download', 13)} Export</button><button class="btn" id="prof-docs">Manage documents</button></div>`;
+  $('#prof-save').addEventListener('click', () => saveProfile(profile));
+  $('#prof-export').addEventListener('click', () => downloadUrl('/export', 'jat13-export.json'));
+  $('#prof-docs').addEventListener('click', () => go('/documents'));
+}
+function renderFieldRows(data) {
+  const rows = [];
+  let i = 0;
+  while (i < PROFILE_FIELDS.length) {
+    const f = PROFILE_FIELDS[i];
+    if (f.half && PROFILE_FIELDS[i + 1]?.half) {
+      const g = PROFILE_FIELDS[i + 1];
+      rows.push(`<div class="field-2col"><div class="field"><label class="field-label">${f.label}</label><input class="inp" data-pf="${f.key}" data-alts="${f.alts.join(',')}" value="${esc(readField(data, f.alts))}"></div><div class="field"><label class="field-label">${g.label}</label><input class="inp" data-pf="${g.key}" data-alts="${g.alts.join(',')}" value="${esc(readField(data, g.alts))}"></div></div>`);
+      i += 2;
+    } else {
+      rows.push(`<div class="field"><label class="field-label">${f.label}</label><input class="inp" data-pf="${f.key}" data-alts="${f.alts.join(',')}" value="${esc(readField(data, f.alts))}"></div>`);
+      i += 1;
+    }
+  }
+  return rows.join('');
+}
+async function saveProfile(profile) {
+  const data = (profile.data && typeof profile.data === 'object') ? { ...profile.data } : {};
+  let name = profile.name;
+  $$('#id-fields [data-pf]').forEach((inp) => {
+    const key = inp.getAttribute('data-pf'); const val = inp.value;
+    if (key === '__name') { name = val; return; }
+    const alts = (inp.getAttribute('data-alts') || key).split(',');
+    // write to the first existing alt key, else the canonical key
+    const existing = alts.find((a) => a in data);
+    data[existing || key] = val;
+  });
+  try {
+    await api(`/profiles/${encodeURIComponent(profile.id)}`, { method: 'PUT', body: { name, data } });
+    profile.name = name; profile.data = data; state.profileName = name;
+    $('#user-name').textContent = name; $('#user-avatar').textContent = initials(name);
+    toast('Profile saved', 'success', 2500);
+  } catch (e) { errToast(e, 'Save'); }
+}
+async function loadLearnedAnswers(q) {
+  if (!state.profileId) return;
+  const box = $('#la-rows'); if (box && !box.querySelector('.la-row')) box.innerHTML = loadingRow();
+  try {
+    const params = new URLSearchParams({ profileId: state.profileId, limit: '200' });
+    if (q) params.set('q', q);
+    const data = await api(`/answers?${params}`, { signal: psig() });
+    const rows = data.rows || [];
+    const cnt = $('#la-count'); if (cnt) cnt.textContent = `${num(data.total || rows.length)} learned`;
+    const b = $('#la-rows'); if (!b) return;
+    if (!rows.length) { b.innerHTML = `<div class="empty">${q ? 'No answers match that filter.' : 'No learned answers yet — they accrue as the engine applies.'}</div>`; return; }
+    b.innerHTML = rows.map((a) => learnedRow(a)).join('');
+    b.querySelectorAll('.la-row').forEach((rowEl) => wireLearnedRow(rowEl));
+  } catch (e) { if (!e?.aborted) { const b = $('#la-rows'); if (b) b.innerHTML = `<div class="empty">Could not load answers — ${esc(e.message)}</div>`; } }
+}
+function learnedRow(a) {
+  const conf = Math.round((a.confidence || 0) * 100);
+  const low = conf < 80;
+  return `<div class="la-row" data-id="${a.id}" data-locked="${a.locked ? 1 : 0}">
+    <div class="la-q"><div class="lbl">${esc(a.label)}</div><div class="meta"><span>${esc(a.provenance)}</span><span>seen ${a.seen_count || 0}×</span><span>used ${a.used_count || 0}×</span>${a.field_type ? `<span>${esc(a.field_type)}</span>` : ''}</div></div>
+    <div class="conf"><span class="bar ${low ? 'low' : ''}"><i style="width:${conf}%"></i></span><span class="v tnum">${conf}</span></div>
+    <div class="lock ${a.locked ? '' : 'open'}" title="${a.locked ? 'Locked — used verbatim' : 'Unlocked'}">${icon(a.locked ? 'lock' : 'unlock', 14)}</div>
+    <div class="iconbtn del" title="Delete">${icon('trash', 14)}</div>
+  </div>`;
+}
+function wireLearnedRow(rowEl) {
+  const id = rowEl.getAttribute('data-id');
+  rowEl.querySelector('.la-q').addEventListener('click', () => {
+    if (rowEl.querySelector('.editrow')) { rowEl.querySelector('.editrow').remove(); return; }
+    const q = rowEl.querySelector('.la-q');
+    const edit = el(`<div class="editrow"><input class="inp" placeholder="Set a new answer (value not shown for privacy)"><button class="btn sm primary">Save</button></div>`);
+    q.appendChild(edit);
+    edit.querySelector('input').focus();
+    edit.querySelector('button').addEventListener('click', async () => {
+      const v = edit.querySelector('input').value.trim(); if (!v) { edit.remove(); return; }
+      try { await api(`/answers/${encodeURIComponent(id)}`, { method: 'PUT', body: { value: v } }); toast('Answer updated', 'success', 2000); edit.remove(); } catch (e) { errToast(e); }
+    });
+  });
+  rowEl.querySelector('.lock').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const locked = rowEl.getAttribute('data-locked') === '1';
+    try { await api(`/answers/${encodeURIComponent(id)}`, { method: 'PUT', body: { locked: !locked } }); rowEl.setAttribute('data-locked', locked ? '0' : '1'); const l = rowEl.querySelector('.lock'); l.className = 'lock ' + (locked ? 'open' : ''); l.innerHTML = icon(locked ? 'unlock' : 'lock', 14); } catch (err) { errToast(err); }
+  });
+  rowEl.querySelector('.del').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    try { await api(`/answers/${encodeURIComponent(id)}`, { method: 'DELETE' }); rowEl.remove(); toast('Answer removed', 'info', 2000); } catch (err) { errToast(err); }
+  });
+}
+
+// ============================================================================
+// DOCUMENTS — real management (upload / download / set-default / delete)
+// ============================================================================
+async function renderDocuments(view) {
+  const pad = el(`<div class="view-pad">
+    ${pageHead('Documents', { sub: 'Résumés, cover letters and portfolios the engine attaches' })}
+    <div class="card col-flex">
+      <div class="card-h"><span class="cap">Library</span><div class="spacer"></div><span class="aside" id="doc-count">—</span></div>
+      <div id="doc-list">${loadingRow()}</div>
+      <div class="upload-zone">
+        <input type="file" id="doc-file" class="inp" style="padding:7px 10px" />
+        <select class="inp grow" id="doc-role" style="max-width:200px"><option value="resume">Résumé</option><option value="cover_letter">Cover letter</option><option value="portfolio">Portfolio</option><option value="transcript">Transcript</option><option value="other">Other</option></select>
+        <input class="inp grow" id="doc-label" placeholder="Label (optional)" style="max-width:240px" />
+        <button class="btn primary" id="doc-upload">${icon('upload', 13)} Upload</button>
+      </div>
+    </div>
+  </div>`);
+  view.appendChild(pad);
+  $('#doc-upload').addEventListener('click', uploadDocument);
+  await loadDocuments();
+}
+async function loadDocuments() {
+  try {
+    const data = await api('/documents', { signal: psig() });
+    const rows = data.rows || [];
+    const cnt = $('#doc-count'); if (cnt) cnt.textContent = `${rows.length} file${rows.length === 1 ? '' : 's'}`;
+    const list = $('#doc-list'); if (!list) return;
+    if (!rows.length) { list.innerHTML = `<div class="empty">No documents yet — upload a résumé to get started.</div>`; return; }
+    list.innerHTML = rows.map((d) => docRow(d)).join('');
+    list.querySelectorAll('[data-dl]').forEach((b) => b.addEventListener('click', () => downloadUrl(`/documents/${b.getAttribute('data-dl')}/download`, b.getAttribute('data-name'))));
+    list.querySelectorAll('[data-def]').forEach((b) => b.addEventListener('click', async () => { try { await api(`/documents/${b.getAttribute('data-def')}/default`, { method: 'POST' }); toast('Set as default', 'success', 2000); loadDocuments(); } catch (e) { errToast(e); } }));
+    list.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', async () => { try { await api(`/documents/${b.getAttribute('data-del')}`, { method: 'DELETE' }); toast('Deleted', 'info', 2000); loadDocuments(); } catch (e) { errToast(e); } }));
+  } catch (e) { if (!e?.aborted) { const list = $('#doc-list'); if (list) list.innerHTML = `<div class="empty">Could not load documents — ${esc(e.message)}</div>`; } }
+}
+function docRow(d) {
+  const roleLabel = { resume: 'Résumé', cover_letter: 'Cover letter', portfolio: 'Portfolio', transcript: 'Transcript', other: 'Other' }[d.role] || d.role;
+  return `<div class="doc-row">
+    <div class="doc-ic">${icon('doc', 18)}</div>
+    <div class="doc-b"><div class="n">${esc(d.name)}</div><div class="m"><span class="rolebadge">${esc(roleLabel)}</span>${d.is_default ? '<span class="defbadge">Default</span>' : ''}<span>${fmtBytes(d.size_bytes)}</span><span>${esc(d.mime || '')}</span><span>added ${fmtDate(d.created_at)}</span>${d.missing_file ? '<span style="color:var(--ember)">missing file</span>' : ''}</div></div>
+    <div class="doc-actions">
+      <button class="btn sm" data-dl="${d.id}" data-name="${esc(d.name)}">${icon('download', 13)}</button>
+      ${d.is_default ? '' : `<button class="btn sm" data-def="${d.id}">Set default</button>`}
+      <button class="btn sm danger" data-del="${d.id}">${icon('trash', 13)}</button>
+    </div>
+  </div>`;
+}
+async function uploadDocument() {
+  const fileInput = $('#doc-file'); const file = fileInput?.files?.[0];
+  if (!file) { toast('Choose a file first', 'danger', 3000); return; }
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('role', $('#doc-role').value);
+  const label = $('#doc-label').value.trim(); if (label) fd.append('label', label);
+  const btn = $('#doc-upload'); if (btn) { btn.disabled = true; btn.textContent = 'Uploading…'; }
+  try { await api('/documents', { method: 'POST', formData: fd, timeoutMs: 60000 }); toast('Uploaded', 'success', 2500); fileInput.value = ''; $('#doc-label').value = ''; await loadDocuments(); }
+  catch (e) { errToast(e, 'Upload'); }
+  finally { if (btn) { btn.disabled = false; btn.innerHTML = `${icon('upload', 13)} Upload`; } }
+}
+
+// ============================================================================
+// INBOX
+// ============================================================================
+function renderInbox(view) {
+  const pad = el(`<div class="view-pad">
+    ${pageHead('Inbox', { sub: 'Employer emails matched to your applications' })}
+    <div class="card col-flex" id="sugg-card"><div class="card-h"><span class="cap">Suggested matches</span><div class="spacer"></div><span class="aside">to review</span></div><div id="sugg-list">${loadingRow()}</div></div>
+    <div class="card col-flex"><div class="card-h"><span class="cap">Recent emails</span><div class="spacer"></div><div class="seg" id="inbox-cat"></div></div><div id="mail-list">${loadingRow()}</div></div>
+  </div>`);
+  view.appendChild(pad);
+  const cats = [['', 'All'], ['application_ack', 'Acknowledged'], ['interview', 'Interview'], ['assessment', 'Assessment'], ['rejection', 'Rejection'], ['offer', 'Offer']];
+  const seg = $('#inbox-cat');
+  seg.innerHTML = cats.map(([v, l], i) => `<span data-cat="${v}" class="${i === 0 ? 'on' : ''}">${l}</span>`).join('');
+  seg.addEventListener('click', (e) => { const s = e.target.closest('span[data-cat]'); if (!s) return; seg.querySelectorAll('span').forEach((x) => x.classList.remove('on')); s.classList.add('on'); loadEmails(s.getAttribute('data-cat')); });
+
+  poll(30000, async () => {
+    const sug = await api('/emails/suggestions', { signal: psig() }).catch(() => ({ rows: [] }));
+    const box = $('#sugg-list'); if (box) {
+      const rows = sug.rows || [];
+      box.innerHTML = rows.length ? rows.map((m) => mailRow(m, true)).join('') : `<div class="empty">No suggestions awaiting review.</div>`;
+    }
+  });
+  loadEmails('');
+}
+async function loadEmails(category) {
+  try {
+    const params = new URLSearchParams({ limit: '60' }); if (category) params.set('category', category);
+    const data = await api(`/emails?${params}`, { signal: psig() });
+    const rows = data.rows || [];
+    const box = $('#mail-list'); if (!box) return;
+    box.innerHTML = rows.length ? rows.map((m) => mailRow(m)).join('') : `<div class="empty">No emails in this category.</div>`;
+  } catch (e) { if (!e?.aborted) { const box = $('#mail-list'); if (box) box.innerHTML = `<div class="empty">Could not load emails — ${esc(e.message)}</div>`; } }
+}
+function mailRow(m, suggestion) {
+  return `<div class="mail"><span class="dot ${suggestion ? 'ember' : 'sage'} mdot"></span><div class="mb"><div class="subj">${esc(m.subject || '(no subject)')}</div><div class="from">${esc(m.from_name || m.from_addr || '')}</div>${m.snippet ? `<div class="snip">${esc(m.snippet)}</div>` : ''}</div>${m.category ? `<span class="mcat">${esc(m.category)}</span>` : ''}<span class="mtime">${fmtAgo(m.sent_at || m.created_at)}</span></div>`;
+}
+
+// ============================================================================
+// ACTIVITY
+// ============================================================================
+function renderActivity(view) {
+  const pad = el(`<div class="view-pad">
+    ${pageHead('Activity', { sub: 'Everything the engine has recorded' })}
+    <div class="card col-flex"><div class="card-h"><span class="cap">Ledger</span><div class="spacer"></div><div class="seg" id="act-filter"></div></div><div id="act-list">${loadingRow()}</div></div>
+  </div>`);
+  view.appendChild(pad);
+  const kinds = [['', 'All'], ['submitted', 'Applied'], ['status_change', 'Status'], ['email_matched', 'Emails'], ['park', 'Parked'], ['created', 'Found']];
+  const seg = $('#act-filter');
+  seg.innerHTML = kinds.map(([v, l], i) => `<span data-kind="${v}" class="${i === 0 ? 'on' : ''}">${l}</span>`).join('');
+  let filter = '';
+  seg.addEventListener('click', (e) => { const s = e.target.closest('span[data-kind]'); if (!s) return; seg.querySelectorAll('span').forEach((x) => x.classList.remove('on')); s.classList.add('on'); filter = s.getAttribute('data-kind'); paint(); });
+  let cache = [];
+  function paint() { const box = $('#act-list'); if (!box) return; const rows = filter ? cache.filter((e) => e.kind === filter) : cache; box.innerHTML = rows.length ? rows.map((e) => activityRowFull(e)).join('') : `<div class="empty">No matching activity.</div>`; }
+  poll(10000, async () => { const data = await api('/events/recent?limit=80', { signal: psig() }); cache = data.rows || []; paint(); });
+}
+function activityRowFull(e) {
+  const label = { status_change: 'Status', submitted: 'Applied', park: 'Parked', email_matched: 'Email', created: 'Found', imported: 'Imported', note: 'Note', document_attached: 'Document' }[e.kind] || e.kind;
+  const dotByKind = { submitted: 'bronze', status_change: 'gold', park: 'ember', email_matched: 'sage', created: 'dim', imported: 'dim', note: 'dim', document_attached: 'bronze' };
+  return `<div class="act"><span class="time">${fmtTime(e.at)}</span><span class="atag ${esc(e.kind)}"><span class="dot ${dotByKind[e.kind] || 'dim'}"></span>${esc(label)}</span><span class="txt">${esc(e.summary || '(no detail)')}</span><span class="via">${esc(e.source || '')}</span></div>`;
+}
+
+// ============================================================================
+// SETTINGS
+// ============================================================================
+async function renderSettings(view) {
+  const pad = el(`<div class="view-pad">
+    ${pageHead('Settings')}
+    <div class="card"><div class="card-h"><span class="cap">Appearance</span><div class="spacer"></div><span class="aside">bronze accent · both grounds</span></div>
+      <div class="theme-grid" id="theme-grid"></div></div>
+    <div class="settings-grid">
+      <div class="card col-flex"><div class="card-h"><span class="cap">AI answering</span><div class="spacer"></div><button class="btn sm" id="ai-detect">Detect</button></div><div class="card-body" id="ai-body">${loadingRow()}</div></div>
+      <div class="card col-flex"><div class="card-h"><span class="cap">Gmail</span><div class="spacer"></div><button class="btn sm" id="gmail-connect">Connect</button></div><div class="card-body" id="gmail-body">${loadingRow()}</div></div>
+    </div>
+    <div class="card col-flex"><div class="card-h"><span class="cap">Auto-apply</span><div class="spacer"></div><span class="aside">keywords · locations · caps</span></div><div class="card-body" id="autoapply-body">${loadingRow()}</div></div>
+    <div class="settings-grid">
+      <div class="card col-flex"><div class="card-h"><span class="cap">Import from v11</span></div><div class="card-body" id="import-body"></div></div>
+      <div class="card col-flex"><div class="card-h"><span class="cap">Token health</span><div class="spacer"></div><button class="btn sm" id="tok-refresh">${icon('refresh', 13)}</button></div><div class="card-body" id="tok-body">${loadingRow()}</div></div>
+    </div>
+    <div class="settings-grid">
+      <div class="card col-flex"><div class="card-h"><span class="cap">Adapters</span></div><div class="card-body" id="adapters-body">${loadingRow()}</div></div>
+      <div class="card col-flex"><div class="card-h"><span class="cap">Data</span></div><div class="card-body"><div class="row"><div class="k"><div class="kn">Export everything</div><div class="kd">Download jobs + applications as JSON.</div></div><button class="btn" id="export-btn">${icon('download', 13)} Export</button></div><div class="row"><div class="k"><div class="kn">Version</div><div class="kd" id="ver-line">—</div></div></div></div></div>
+    </div>
+  </div>`);
+  view.appendChild(pad);
+
+  renderThemeGrid();
+  loadSettingsData();
+  renderImportWizard();
+  $('#export-btn').addEventListener('click', () => downloadUrl('/export', 'jat13-export.json'));
+  $('#ai-detect').addEventListener('click', detectAi);
+  $('#gmail-connect').addEventListener('click', connectGmail);
+  $('#tok-refresh').addEventListener('click', loadTokenHealth);
+  api('/version').then((v) => { const l = $('#ver-line'); if (l) l.textContent = `JAT 13 · v${v.version} · protocol ${v.protocol}`; }).catch(() => {});
+}
+function renderThemeGrid() {
+  const grid = $('#theme-grid'); if (!grid) return;
+  const cur = getMode();
+  grid.innerHTML = THEMES.map((t) => `<div class="theme-tile ${t.id === cur ? 'active' : ''}" data-theme="${t.id}"><div class="swatch ${t.swatch}"><span class="chipbar"></span></div><div class="tn">${t.name}</div><div class="td">${t.mode}</div></div>`).join('');
+  grid.querySelectorAll('.theme-tile').forEach((tile) => tile.addEventListener('click', () => { setTheme(tile.getAttribute('data-theme')); renderThemeGrid(); }));
+}
+async function loadSettingsData() {
+  let settings;
+  try { settings = await api('/settings', { signal: psig() }); state.settings = settings; } catch (e) { if (e?.aborted) return; }
+  renderAutoApplySettings(settings || {});
+  loadAiCard();
+  loadGmailCard();
+  loadTokenHealth();
+  loadAdapters();
+}
+function renderAutoApplySettings(settings) {
+  const aa = settings.autoApply || {};
+  const body = $('#autoapply-body'); if (!body) return;
+  body.innerHTML = `
+    <div class="field" style="padding:8px 0"><label class="field-label">Keywords</label><div class="tag-input" id="kw-input"></div></div>
+    <div class="field" style="padding:8px 0"><label class="field-label">Locations</label><div class="tag-input" id="loc-input"></div></div>
+    <div class="row"><div class="k"><div class="kn">Max applications / day</div><div class="kd">Hard daily cap across all sources.</div></div><input class="inp tnum" id="cap-day" type="number" min="0" max="1000" value="${aa.maxPerDay ?? 120}" style="max-width:110px;text-align:right"></div>
+    <div class="row"><div class="k"><div class="kn">Max applications / hour</div><div class="kd">Rolling hourly ceiling.</div></div><input class="inp tnum" id="cap-hour" type="number" min="0" max="500" value="${aa.maxPerHour ?? 20}" style="max-width:110px;text-align:right"></div>
+    <div class="row"><div class="k"><div class="kn">Easy-apply only</div><div class="kd">Restrict to one-click postings.</div></div><button class="toggle ${aa.easyApplyOnly ? 'on' : ''}" id="easy-toggle">${aa.easyApplyOnly ? 'On' : 'Off'} <span class="knob"></span></button></div>`;
+  makeTagInput('#kw-input', aa.keywords || [], (arr) => putSetting('autoApply', 'keywords', arr));
+  makeTagInput('#loc-input', aa.locations || [], (arr) => putSetting('autoApply', 'locations', arr));
+  $('#cap-day').addEventListener('change', (e) => putSetting('autoApply', 'maxPerDay', Number(e.target.value)));
+  $('#cap-hour').addEventListener('change', (e) => putSetting('autoApply', 'maxPerHour', Number(e.target.value)));
+  $('#easy-toggle').addEventListener('click', (e) => { const on = !e.currentTarget.classList.contains('on'); e.currentTarget.classList.toggle('on', on); e.currentTarget.innerHTML = `${on ? 'On' : 'Off'} <span class="knob"></span>`; putSetting('autoApply', 'easyApplyOnly', on); });
+}
+function makeTagInput(sel, initial, onChange) {
+  const box = $(sel); if (!box) return; let tags = [...initial];
+  function paint() {
+    box.innerHTML = tags.map((t, i) => `<span class="tg">${esc(t)} <b data-i="${i}">×</b></span>`).join('') + `<input placeholder="Add…">`;
+    box.querySelectorAll('b[data-i]').forEach((b) => b.addEventListener('click', () => { tags.splice(Number(b.getAttribute('data-i')), 1); paint(); onChange(tags); }));
+    const inp = box.querySelector('input');
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter' && inp.value.trim()) { tags.push(inp.value.trim()); inp.value = ''; paint(); onChange(tags); inp.focus(); } else if (e.key === 'Backspace' && !inp.value && tags.length) { tags.pop(); paint(); onChange(tags); inp.focus(); } });
+  }
+  paint();
+}
+async function putSetting(section, key, value) {
+  try { await api(`/settings/${section}/${key}`, { method: 'PUT', body: { value } }); toast('Saved', 'success', 1500); } catch (e) { errToast(e, 'Setting'); }
+}
+async function loadAiCard() {
+  const body = $('#ai-body'); if (!body) return;
+  try {
+    const ai = await api('/ai/status', { signal: psig() });
+    body.innerHTML = `
+      <div class="row"><div class="k"><div class="kn">Status</div><div class="kd">${ai.available ? 'Ready to synthesize screening answers.' : 'Not detected — answers fall back to your learned memory only.'}</div></div><span class="tstate ${ai.available ? 'ok' : 'unknown'}">${ai.available ? 'Available' : 'Offline'}</span></div>
+      <div class="row"><div class="k"><div class="kn">Model</div><div class="kd">${esc(ai.source || 'codex')}</div></div><span class="mono" style="color:var(--ink-dim);font-size:12px">${esc(ai.model || '—')}</span></div>
+      <div class="row"><div class="k"><div class="kn">Manual path</div><div class="kd">Point at a Codex CLI binary if auto-detect misses.</div></div></div>
+      <div style="display:flex;gap:8px;margin-top:4px"><input class="inp" id="ai-path" placeholder="/path/to/codex" value="${esc(ai.detail || '')}"><button class="btn sm" id="ai-path-save">Save</button></div>`;
+    $('#ai-path-save').addEventListener('click', async () => { const v = $('#ai-path').value.trim(); if (!v) return; try { await api('/settings/ai/codexPath', { method: 'PUT', body: { value: v } }); toast('Saved', 'success', 2000); } catch (e) { toast('This build does not accept a manual AI path yet', 'info', 3500); } });
+  } catch (e) {
+    body.innerHTML = comingOnline('AI answering', 'The AI status endpoint is not live in this build yet. Screening answers use your learned memory until it lands.');
+  }
+}
+async function detectAi() {
+  try { const r = await api('/ai/detect', { method: 'POST' }); toast(r?.available ? `Detected ${r.model || 'AI'}` : 'No AI runtime found', r?.available ? 'success' : 'info', 3000); loadAiCard(); }
+  catch { toast('Detection is not available in this build yet', 'info', 3000); }
+}
+async function loadGmailCard() {
+  const body = $('#gmail-body'); if (!body) return;
+  try {
+    const g = await api('/gmail/status', { signal: psig() });
+    const accts = g.accounts || [];
+    if (!accts.length) { body.innerHTML = `<div class="row"><div class="k"><div class="kn">No account connected</div><div class="kd">Connect Gmail so the inbox pipeline can advance statuses.</div></div><span class="tstate unknown">Idle</span></div><div class="row"><div class="k"><div class="kn">Sync cadence</div><div class="kd">${esc(g.cron || '—')}</div></div><span class="mono" style="font-size:11px;color:var(--ink-faint)">${g.running ? 'running' : 'stopped'}</span></div>`; return; }
+    body.innerHTML = accts.map((a) => `<div class="row"><div class="k"><div class="kn">${esc(a.email || a.id)}</div><div class="kd">${a.lastOkAt ? 'last synced ' + fmtAgo(a.lastOkAt) + ' ago' : 'never synced'}</div></div><span class="tstate ${tokClass(a.tokenState)}">${esc(a.tokenState || 'unknown')}</span></div>`).join('') + `<div class="row"><div class="k"><div class="kn">Sync now</div><div class="kd">${esc(g.cron || '')}</div></div><button class="btn sm" id="gmail-sync">${icon('refresh', 13)} Sync</button></div>`;
+    $('#gmail-sync')?.addEventListener('click', async () => { try { toast('Syncing…', 'info', 1500); const s = await api('/gmail/sync', { method: 'POST', body: {} }); toast(`Synced — ${s.stored || 0} new, ${s.elevated || 0} advanced`, 'success', 3500); loadGmailCard(); } catch (e) { errToast(e, 'Gmail sync'); } });
+  } catch (e) { body.innerHTML = comingOnline('Gmail', 'The Gmail status endpoint is not live in this build yet.'); }
+}
+function tokClass(s) { return s === 'ok' || s === 'valid' ? 'ok' : s === 'expired' ? 'expired' : s === 'revoked' ? 'revoked' : 'unknown'; }
+async function connectGmail() {
+  try { await api('/gmail/connect/start', { method: 'POST' }); toast('Opening Gmail consent…', 'info', 3000); }
+  catch { toast('Gmail connect is not wired in this build yet', 'info', 3500); }
+}
+async function loadTokenHealth() {
+  const body = $('#tok-body'); if (!body) return;
+  try {
+    const data = await api('/secrets/health', { signal: psig() });
+    const rows = data.rows || [];
+    if (!rows.length) { body.innerHTML = `<div class="empty">No credentials stored.</div>`; return; }
+    body.innerHTML = rows.map((r) => `<div class="tokrow"><span class="kk">${esc(r.key)}</span><span class="tstate ${tokClass(r.status)}">${esc(r.status)}</span></div>`).join('');
+  } catch (e) { if (!e?.aborted) body.innerHTML = `<div class="empty">Could not load token health.</div>`; }
+}
+async function loadAdapters() {
+  const body = $('#adapters-body'); if (!body) return;
+  try {
+    const data = await api('/adapters', { signal: psig() });
+    const rows = data.rows || [];
+    body.innerHTML = rows.length ? rows.map((a) => `<div class="row"><div class="k"><div class="kn">${esc(a.id)}</div><div class="kd">${esc((a.hosts || []).join(', ') || a.source || '')}</div></div><span class="mono" style="font-size:11px;color:var(--ink-faint)">v${a.version} · ${a.pages} pages</span></div>`).join('') : `<div class="empty">No adapters registered.</div>`;
+  } catch (e) { if (!e?.aborted) body.innerHTML = `<div class="empty">Could not load adapters.</div>`; }
+}
+function comingOnline(title, sub) { return `<div style="text-align:center;padding:20px 10px"><div style="font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--bronze);margin-bottom:8px">Coming online</div><div style="font-size:12.5px;color:var(--ink-faint);line-height:1.6">${esc(sub)}</div></div>`; }
+
+// --- v11 import wizard ---
+function renderImportWizard() {
+  const body = $('#import-body'); if (!body) return;
+  body.innerHTML = `
+    <div class="row" style="border:none"><div class="k"><div class="kn">v11 database path</div><div class="kd">Point at your v11 install folder or SQLite file. Quit v11 first.</div></div></div>
+    <div style="display:flex;gap:8px;margin:4px 0 12px"><input class="inp" id="imp-path" placeholder="C:\\Users\\…\\jat-v11"><button class="btn" id="imp-plan">Plan</button></div>
+    <div id="imp-report"></div>`;
+  $('#imp-plan').addEventListener('click', importPlan);
+}
+async function importPlan() {
+  const path = $('#imp-path').value.trim(); if (!path) { toast('Enter a path', 'danger', 3000); return; }
+  const report = $('#imp-report'); report.innerHTML = loadingRow('Planning import…');
+  try {
+    const plan = await api('/import/plan', { method: 'POST', body: { sourcePath: path } });
+    const counts = plan.counts || plan.summary || plan;
+    const rows = Object.entries(counts).filter(([, v]) => typeof v === 'number').map(([k, v]) => `<div class="wr-row"><span>${esc(k)}</span><b>${num(v)}</b></div>`).join('');
+    report.innerHTML = `<div class="wizard-report"><div class="wr-h">Import plan</div>${rows || '<div class="wr-row"><span>Ready to import</span><b>ok</b></div>'}</div><button class="btn primary block" id="imp-exec">Execute import</button>`;
+    $('#imp-exec').addEventListener('click', () => importExecute(path));
+  } catch (e) {
+    if (e.code === 'V11_RUNNING') report.innerHTML = `<div class="banner danger" style="border-radius:9px">v11 is still running — quit it first so the import reads a consistent snapshot.</div>`;
+    else report.innerHTML = `<div class="banner danger" style="border-radius:9px">${esc(e.message || 'Import plan failed')}</div>`;
+  }
+}
+async function importExecute(path) {
+  const btn = $('#imp-exec'); if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+  try { const r = await api('/import/execute', { method: 'POST', body: { sourcePath: path }, timeoutMs: 120000 }); toast('Import complete', 'success', 4000); const report = $('#imp-report'); if (report) report.innerHTML = `<div class="wizard-report"><div class="wr-h">Imported</div>${Object.entries(r.counts || r).filter(([, v]) => typeof v === 'number').map(([k, v]) => `<div class="wr-row"><span>${esc(k)}</span><b>${num(v)}</b></div>`).join('') || '<div class="wr-row"><span>done</span><b>ok</b></div>'}</div>`; }
+  catch (e) { if (e.code === 'V11_RUNNING') toast('Quit v11 first', 'danger', 5000); else errToast(e, 'Import'); if (btn) { btn.disabled = false; btn.textContent = 'Execute import'; } }
+}
+
+// ============================================================================
+// COMMAND PALETTE (Ctrl+K)
+// ============================================================================
+let paletteOpen = false;
+function openPalette() {
+  if (paletteOpen) return; paletteOpen = true;
+  const node = el(`<div class="palette">
+    <div class="palette-input">${icon('search', 18)}<input id="pal-input" placeholder="Jump to a page, search jobs, or run an action…" autocomplete="off"><kbd>Esc</kbd></div>
+    <div class="palette-list" id="pal-list"></div>
+  </div>`);
+  const close = openOverlay(node, { onClose: () => { paletteOpen = false; } });
+  const input = node.querySelector('#pal-input');
+  const list = node.querySelector('#pal-list');
+  let items = []; let sel = 0;
+
+  const baseActions = [
+    ...NAV.flatMap((g) => g.items.map((i) => ({ type: 'nav', icon: i.icon, label: i.label, hint: g.group, run: () => go(i.route) }))),
+    { type: 'action', icon: 'bolt', label: state.applying ? 'Pause auto-apply' : 'Start auto-apply', hint: 'action', run: () => toggleApplying() },
+    { type: 'action', icon: 'bell', label: 'Open Needs-You queue', hint: 'action', run: () => go('/needs') },
+    { type: 'action', icon: 'download', label: 'Export data', hint: 'action', run: () => downloadUrl('/export', 'jat13-export.json') },
+  ];
+
+  function paint() {
+    list.innerHTML = '';
+    let idx = 0; let lastSec = '';
+    items.forEach((it) => {
+      const sec = it.type === 'job' ? 'Jobs' : it.type === 'nav' ? 'Navigate' : 'Actions';
+      if (sec !== lastSec) { list.insertAdjacentHTML('beforeend', `<div class="palette-sec">${sec}</div>`); lastSec = sec; }
+      const row = el(`<div class="palette-item ${idx === sel ? 'sel' : ''}" data-i="${idx}">${icon(it.icon, 16)}<span class="pgrow"><b>${esc(it.label)}</b>${it.desc ? ' · ' + esc(it.desc) : ''}</span><span class="phint">${esc(it.hint || '')}</span></div>`);
+      row.addEventListener('click', () => { it.run(); close(); });
+      list.appendChild(row); idx++;
+    });
+  }
+  function filter(q) {
+    const ql = q.toLowerCase().trim();
+    let base = baseActions;
+    if (!ql) { items = base; sel = 0; paint(); return; }
+    items = base.filter((a) => a.label.toLowerCase().includes(ql)); sel = 0; paint();
+    // search jobs
+    api(`/jobs?q=${encodeURIComponent(ql)}&limit=6`).then((d) => {
+      const jobs = (d.rows || []).map((j) => ({ type: 'job', icon: 'layers', label: j.title || 'Role', desc: j.company || j.location || '', hint: j.source || '', run: () => { jobCache.set(j.id, { title: j.title, company: j.company, source: j.source }); go('/applications'); } }));
+      items = [...base.filter((a) => a.label.toLowerCase().includes(ql)), ...jobs]; paint();
+    }).catch(() => {});
+  }
+  input.addEventListener('input', debounce(() => filter(input.value), 160));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(items.length - 1, sel + 1); paint(); scrollSel(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(0, sel - 1); paint(); scrollSel(); }
+    else if (e.key === 'Enter') { e.preventDefault(); const it = items[sel]; if (it) { it.run(); close(); } }
+    else if (e.key === 'Escape') { close(); }
+  });
+  function scrollSel() { const s = list.querySelector('.palette-item.sel'); if (s) s.scrollIntoView({ block: 'nearest' }); }
+  filter('');
+  setTimeout(() => input.focus(), 20);
+}
+
+// ---------------------------------------------------------------------------
+// download helper (auth'd fetch → blob → anchor)
+// ---------------------------------------------------------------------------
+async function downloadUrl(path, filename) {
+  try {
+    const res = await api(path, { raw: true, timeoutMs: 60000 });
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = filename || 'download'; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  } catch (e) { errToast(e, 'Download'); }
+}
+
+// ============================================================================
+// keyboard shortcuts (Ctrl+K, g-chords, Esc)
+// ============================================================================
+let chordArmed = false; let chordTimer = null;
+function isTyping(e) { const t = e.target; return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable); }
+function initKeys() {
+  window.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); return; }
+    if (e.key === 'Escape') { if (closeTopOverlay()) return; }
+    if (isTyping(e) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (chordArmed) {
+      const route = CHORD_ROUTE[e.key.toUpperCase()];
+      chordArmed = false; clearTimeout(chordTimer);
+      if (route) { e.preventDefault(); go(route); }
+      return;
+    }
+    if (e.key.toLowerCase() === 'g') { chordArmed = true; clearTimeout(chordTimer); chordTimer = setTimeout(() => { chordArmed = false; }, 900); }
+  });
+}
+
+// ============================================================================
+// boot
+// ============================================================================
+async function loadInitialProfile() {
+  try {
+    const list = await api('/profiles');
+    const rows = list.rows || [];
+    const def = rows.find((r) => r.is_default) || rows[0];
+    if (def) { state.profileId = def.id; state.profileName = def.name || state.profileName; $('#user-name').textContent = state.profileName; $('#user-avatar').textContent = initials(state.profileName); }
+  } catch { /* non-fatal */ }
+}
+async function loadInitialSettings() {
+  try {
+    const s = await api('/settings');
+    state.settings = s;
+    const mode = normalizeMode(s.appearance?.theme || s.appearance?.themeId || getMode());
+    setTheme(mode, false);
+    renderThemeGrid();
+  } catch { /* keep localStorage theme */ }
+}
+
+async function main() {
+  initTheme();
+  renderShell();
+  initKeys();
+  window.addEventListener('hashchange', router);
+
+  const ok = await bootstrap();
+  if (!ok || !state.token) { showNotConnected(); return; }
+  state.online = true;
+  await Promise.all([loadInitialProfile(), loadInitialSettings()]);
+  startGlobalPoller();
+  if (!location.hash) location.hash = '#/';
+  router();
+}
+main().catch((e) => { console.error(e); showNotConnected(); });

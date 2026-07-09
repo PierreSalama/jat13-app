@@ -14,6 +14,18 @@ const unusedGateway: RunGateway = {
   command: () => Promise.reject(new Error('gateway should not be called in these tests')),
   awaitResume: () => Promise.reject(new Error('no')),
 };
+// minimal fakes for the AI + discovery deps (these routes aren't exercised by this suite)
+const fakeAi = {
+  status: () => Promise.resolve({ available: false, detail: 'test' }),
+  generate: () => Promise.resolve({ text: '', ms: 0 }),
+  answerScreeningQuestion: () => Promise.resolve({ value: null, confidence: 0, refused: true, reason: 'test' }),
+} as unknown as import('../../app/src/main/ai/index.js').AiService;
+const fakeDiscovery = {
+  runOnce: () => Promise.resolve({ lanes: [] }),
+  start: () => {},
+  stop: () => {},
+} as unknown as import('../../app/src/main/discovery/service.js').DiscoveryService;
+const svc = { aiService: fakeAi, discovery: fakeDiscovery };
 const TOKEN = 'test-token';
 const auth = { headers: { 'X-JAT13-Token': TOKEN } };
 
@@ -31,7 +43,7 @@ describe('REST API + run-service wiring', () => {
     runService = makeRunService({ dal, gateway: unusedGateway, registry, pollMs: 999999 });
     app = new Hono();
     // inject a deterministic "v11 not running" so the import tests don't depend on a real :7744
-    mountApi(app, { dal, runService, registry, token: TOKEN, version: '13.0.0', v11Probe: () => Promise.resolve(false) });
+    mountApi(app, { dal, runService, registry, ...svc, token: TOKEN, version: '13.0.0', v11Probe: () => Promise.resolve(false) });
 
     db.prepare('INSERT INTO profiles (id, name, is_default, created_at, updated_at) VALUES (?,?,1,?,?)').run('p1', 'Pierre', 1, 1);
     db.prepare('INSERT INTO jobs (id, source, title, company, job_url, first_seen_at, last_seen_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
@@ -116,7 +128,7 @@ describe('REST API + run-service wiring', () => {
   it('POST /app/front invokes the window callback', async () => {
     let fronted = 0;
     const app2 = new Hono();
-    mountApi(app2, { dal, runService, registry, token: TOKEN, version: '13.0.0', frontWindow: () => { fronted++; } });
+    mountApi(app2, { dal, runService, registry, ...svc, token: TOKEN, version: '13.0.0', frontWindow: () => { fronted++; } });
     const res = await app2.request('/api/app/front', { method: 'POST', ...auth });
     expect(res.status).toBe(200);
     expect(fronted).toBe(1);
@@ -124,7 +136,7 @@ describe('REST API + run-service wiring', () => {
 
   it('refuses import while v11 is running (409 V11_RUNNING)', async () => {
     const app2 = new Hono();
-    mountApi(app2, { dal, runService, registry, token: TOKEN, version: '13.0.0', v11Probe: () => Promise.resolve(true) });
+    mountApi(app2, { dal, runService, registry, ...svc, token: TOKEN, version: '13.0.0', v11Probe: () => Promise.resolve(true) });
     const res = await app2.request('/api/import/plan', {
       method: 'POST',
       headers: { ...auth.headers, 'content-type': 'application/json' },

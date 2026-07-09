@@ -8,11 +8,16 @@ import type { Dal } from '../db/dal/index.js';
 import type { RunService } from '../engine/run-service.js';
 import type { Registry } from '../adapters/registry.js';
 import { planImport, executeImport } from '../importer/v11.js';
+import { migrateGmailCredentials } from '../importer/gmail-creds.js';
+import type { AiService } from '../ai/index.js';
+import type { DiscoveryService } from '../discovery/service.js';
 
 export interface ApiDeps {
   dal: Dal;
   runService: RunService;
   registry: Registry;
+  aiService: AiService;
+  discovery: DiscoveryService;
   token: string;
   version: string;
   /** mount extra routes on the AUTHED /api sub-app (e.g. the Gmail routes). */
@@ -21,6 +26,8 @@ export interface ApiDeps {
   v11Probe?: () => Promise<boolean>;
   /** show + focus the app window (popup "Open dashboard"); absent in headless tests. */
   frontWindow?: () => void;
+  /** decrypt a v11-sealed value (Electron safeStorage) so the import can migrate Gmail creds. */
+  unsealV11?: (stored: string) => string;
 }
 
 function intParam(v: string | undefined, def: number): number {
@@ -115,7 +122,52 @@ export function mountApi(app: Hono, deps: ApiDeps): void {
     return c.json({ ok: true });
   });
 
+  // ---- documents: real management (upload / download / set-default / delete) ----
   api.get('/documents', (c) => c.json({ rows: dal.documents.listLean() }));
+  api.post('/documents', async (c) => {
+    // multipart upload: file + optional role/label. The browser FormData carries the bytes.
+    const form = await c.req.formData();
+    const file = form.get('file');
+    if (!(file instanceof File)) return c.json({ error: 'no_file' }, 400);
+    const roleRaw = String(form.get('role') ?? 'resume');
+    const roles = ['resume', 'cover_letter', 'portfolio', 'transcript', 'other'];
+    const role = (roles.includes(roleRaw) ? roleRaw : 'resume') as 'resume' | 'cover_letter' | 'portfolio' | 'transcript' | 'other';
+    const bytes = Buffer.from(await file.arrayBuffer());
+    const prof = dal.ctx.db.prepare('SELECT id FROM profiles WHERE is_default = 1 LIMIT 1').get() as { id: string } | undefined;
+    try {
+      const add: Parameters<typeof dal.documents.add>[0] = { name: file.name.slice(0, 256), role, bytes, source: 'upload' };
+      if (file.type) add.mime = file.type;
+      if (prof) add.profileId = prof.id;
+      const label = form.get('label');
+      if (typeof label === 'string' && label) add.label = label.slice(0, 128);
+      return c.json({ ok: true, doc: dal.documents.add(add) });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : 'upload_failed' }, 400);
+    }
+  });
+  api.get('/documents/:id/download', (c) => {
+    const id = c.req.param('id');
+    const bytes = dal.documents.getBytes(id);
+    if (!bytes) return c.json({ error: 'not_found' }, 404);
+    const row = dal.documents.listLean().rows.find((r) => r.id === id);
+    return new Response(new Uint8Array(bytes), {
+      status: 200,
+      headers: {
+        'content-type': row?.mime ?? 'application/octet-stream',
+        'content-disposition': `attachment; filename="${(row?.name ?? 'document').replace(/["\\]/g, '')}"`,
+      },
+    });
+  });
+  api.post('/documents/:id/default', (c) => {
+    try {
+      dal.documents.setDefault(c.req.param('id'));
+      return c.json({ ok: true });
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : 'not_found' }, 404);
+    }
+  });
+  api.delete('/documents/:id', (c) => c.json({ ok: dal.documents.remove(c.req.param('id')) }));
+
   api.get('/emails', (c) => {
     const q = c.req.query();
     const p: NonNullable<Parameters<typeof dal.emails.listLean>[0]> = { limit: intParam(q.limit, 100), offset: intParam(q.offset, 0) };
@@ -139,6 +191,21 @@ export function mountApi(app: Hono, deps: ApiDeps): void {
     c.json({ rows: registry.all().map((a) => ({ id: a.id, version: a.version, source: a.source, hosts: a.hosts, priority: a.priority, pages: a.pages.length })) }),
   );
   api.get('/secrets/health', (c) => c.json({ rows: dal.secrets.health() }));
+
+  // ---- AI (Codex CLI, ChatGPT subscription — no API keys) ----
+  api.get('/ai/status', async (c) => {
+    const ai = dal.settings.get('ai') as { codexPath?: string; enabled?: boolean };
+    const st = await deps.aiService.status(ai.codexPath || undefined);
+    return c.json({ ...st, enabled: ai.enabled !== false });
+  });
+  api.post('/ai/detect', async (c) => {
+    const ai = dal.settings.get('ai') as { codexPath?: string };
+    return c.json(await deps.aiService.status(ai.codexPath || undefined));
+  });
+
+  // ---- discovery (ATS job sourcing) ----
+  api.get('/discovery/status', (c) => c.json({ lanes: dal.discovery.stats() }));
+  api.post('/discovery/run', async (c) => c.json(await deps.discovery.runOnce()));
 
   // popup quick actions
   api.post('/app/front', (c) => {
@@ -179,10 +246,16 @@ export function mountApi(app: Hono, deps: ApiDeps): void {
     }
   });
   api.post('/import/execute', async (c) => {
-    const { sourcePath } = (await c.req.json()) as { sourcePath: string };
+    const { sourcePath, migrateGmail } = (await c.req.json()) as { sourcePath: string; migrateGmail?: boolean };
     if (await (deps.v11Probe ?? v11IsRunning)()) return c.json({ error: 'V11_RUNNING', message: 'Quit JAT v11 first — the import reads a consistent snapshot.' }, 409);
     try {
-      return c.json(executeImport(dal.ctx.db, sourcePath));
+      const result = executeImport(dal.ctx.db, sourcePath);
+      let gmail: ReturnType<typeof migrateGmailCredentials> | undefined;
+      if (migrateGmail) {
+        const mdeps = deps.unsealV11 ? { dal, unsealV11: deps.unsealV11 } : { dal };
+        gmail = migrateGmailCredentials(dal.ctx.db, sourcePath, mdeps, { consent: true });
+      }
+      return c.json({ ...result, gmail });
     } catch (e) {
       const err = e as { code?: string; message?: string };
       return c.json({ error: err.code ?? 'import_failed', message: err.message }, 400);

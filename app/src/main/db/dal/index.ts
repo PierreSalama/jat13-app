@@ -13,6 +13,7 @@ import { makeSettingsDal } from './settings.js';
 import { makeSecretsDal, type Sealer } from './secrets.js';
 import { makeEventsDal } from './events.js';
 import { makeEmailsDal } from './emails.js';
+import { makeDiscoveryDal } from './discovery.js';
 
 export interface Dal {
   jobs: ReturnType<typeof makeJobsDal>;
@@ -24,6 +25,7 @@ export interface Dal {
   secrets: ReturnType<typeof makeSecretsDal>;
   events: ReturnType<typeof makeEventsDal>;
   emails: ReturnType<typeof makeEmailsDal>;
+  discovery: ReturnType<typeof makeDiscoveryDal>;
   /** the shared context, so callers can run their own ctx.db.transaction / emit / newId. */
   ctx: DalContext;
 }
@@ -39,6 +41,7 @@ export function makeDal(ctx: DalContext, deps: { sealer: Sealer }): Dal {
     secrets: makeSecretsDal(ctx, deps.sealer),
     events: makeEventsDal(ctx),
     emails: makeEmailsDal(ctx),
+    discovery: makeDiscoveryDal(ctx),
     ctx,
   };
 }

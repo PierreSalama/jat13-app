@@ -24,6 +24,7 @@ import { makeMatcher, type MatchableEmail, type MatchResult } from './match.js';
 import {
   computeTokenState,
   makeOAuthClient,
+  openClientCredentials,
   openToken,
   type OAuthClientConfig,
   type TokenState,
@@ -442,11 +443,8 @@ export function makeGmailClientFactory(dal: Dal): GmailClientFactory {
     if (!tokens) throw new Error(`invalid_grant: no sealed token for account ${accountId}`);
     // Client credentials (Google Cloud desktop-app id/secret) live sealed in the secrets DAL, not in
     // settings — they are a credential, and settings.gmail only registers query/syncMinutes. The consent
-    // flow (the app's job) seals them under these keys before this factory is ever used.
-    const cfg: OAuthClientConfig = {
-      clientId: dal.secrets.open('gmail.clientId') ?? '',
-      clientSecret: dal.secrets.open('gmail.clientSecret') ?? '',
-    };
+    // flow (connect.ts) + the v11 migration seal them under these keys before this factory is ever used.
+    const cfg: OAuthClientConfig = openClientCredentials(dal);
     const authClient = await makeOAuthClient(cfg, tokens);
     const { gmail } = (await import('@googleapis/gmail')) as {
       gmail: (opts: { version: 'v1'; auth: unknown }) => GmailApiClient;
