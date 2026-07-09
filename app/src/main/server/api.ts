@@ -106,10 +106,23 @@ export function mountApi(app: Hono, deps: ApiDeps): void {
   });
   api.get('/runs/:id/steps', (c) => c.json({ steps: dal.runs.getSteps(c.req.param('id')) }));
 
-  // the Needs-You queue: runs waiting on a human (walls) or a review, with their pending questions
+  // the Needs-You queue: runs waiting on a human (walls) or a review, ENRICHED with the actual parked
+  // questions + park kind + job title so the UI can render a real answer form (not a generic one).
   api.get('/needs-you', (c) => {
-    const human = dal.runs.listLean({ state: 'needs_human', limit: 200 }).rows;
-    const review = dal.runs.listLean({ state: 'ready_for_review', limit: 200 }).rows;
+    const enrich = (r: { id: string; job_id?: string }) => {
+      const full = dal.runs.get(r.id);
+      const detail = full ? dal.jobs.getDetail(full.job_id) : undefined;
+      return {
+        ...r,
+        park_kind: full?.park_kind ?? null,
+        park_detail: full?.park_detail ?? null,
+        questions: full?.pending_questions ?? [],
+        job_title: detail?.title ?? null,
+        company: detail?.company ?? null,
+      };
+    };
+    const human = dal.runs.listLean({ state: 'needs_human', limit: 200 }).rows.map(enrich);
+    const review = dal.runs.listLean({ state: 'ready_for_review', limit: 200 }).rows.map(enrich);
     return c.json({ needsHuman: human, readyForReview: review });
   });
   // answer a parked question, then re-queue the run (needs_human → queued) so it resumes
@@ -322,6 +335,11 @@ export function mountApi(app: Hono, deps: ApiDeps): void {
     if (q.q) input.q = q.q;
     if (q.kind === 'qa' || q.kind === 'field') input.kind = q.kind;
     return c.json(dal.answers.list(profileId, input));
+  });
+  // full answer WITH value — the Profile page loads this on demand to view/edit an answer.
+  api.get('/answers/:id', (c) => {
+    const a = dal.answers.get(c.req.param('id'));
+    return a ? c.json(a) : c.json({ error: 'not_found' }, 404);
   });
   api.put('/answers/:id', async (c) => {
     const id = c.req.param('id');

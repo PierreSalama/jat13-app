@@ -377,6 +377,12 @@ export function makeAnswersDal(ctx: DalContext) {
     return row ? mapFull(row) : undefined;
   }
 
+  /** Full answer by id (VALUE included) — the Profile page loads this on demand to view/edit an answer. */
+  function get(id: string): LearnedAnswer | undefined {
+    const row = stmt(`SELECT ${FULL_COLS} FROM learned_answers WHERE id = ?`).get(id) as FullRow | undefined;
+    return row ? mapFull(row) : undefined;
+  }
+
   /** Every row for a profile — the answer-service turns this into an in-memory fuzzy index. Full rows
    *  (values included) because the fuzzy matcher needs the value to return; bounded by profile size. */
   function snapshot(profileId: string): LearnedAnswer[] {
@@ -439,7 +445,7 @@ export function makeAnswersDal(ctx: DalContext) {
     return row;
   }
 
-  return { record, lookup, snapshot, list, promoteToProfile, markUsed, isSensitiveKey };
+  return { record, lookup, get, snapshot, list, promoteToProfile, markUsed, isSensitiveKey };
 }
 
 // The lean patch a mutation broadcasts on the PatchBus: the changed row in its list shape (no value/
