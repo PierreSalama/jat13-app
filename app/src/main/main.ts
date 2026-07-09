@@ -18,6 +18,8 @@ import { makeGmailService, makeGmailClientFactory, mountGmailApi } from './gmail
 import { mountGmailConnectApi } from './gmail/connect.js';
 import { makeAiService } from './ai/index.js';
 import { makeDiscoveryService } from './discovery/service.js';
+import { makeLearnDistiller } from './learn/distiller.js';
+import { mountLearnApi } from './learn/index.js';
 import { IDENTITY } from '@jat13/shared';
 
 /** v11 sealed values are `enc:v1:` + base64(DPAPI); same OS user → v13 safeStorage decrypts them. */
@@ -73,6 +75,7 @@ async function boot(): Promise<void> {
   const runService = makeRunService({ dal, gateway, registry, ai: aiService, log: (m) => console.log(`[run] ${m}`) });
   const gmail = makeGmailService({ dal, gmailClientFactory: makeGmailClientFactory(dal), log: (m) => console.log(`[gmail] ${m}`) });
   const discovery = makeDiscoveryService({ dal, discoveryDal: dal.discovery, spacingMs: 1500, log: (m) => console.log(`[discovery] ${m}`) });
+  const learnDistiller = makeLearnDistiller({ dal });
   const openExternal = (url: string): Promise<void> => shell.openExternal(url);
 
   server = await startServer({
@@ -94,6 +97,7 @@ async function boot(): Promise<void> {
         extend: (api) => {
           mountGmailApi(api, gmail, dal);
           mountGmailConnectApi(api, dal, { openExternal, log: (m) => console.log(`[gmail] ${m}`) });
+          mountLearnApi(api, dal, learnDistiller);
         },
         frontWindow: () => {
           const [win] = BrowserWindow.getAllWindows();

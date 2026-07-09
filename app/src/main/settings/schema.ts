@@ -166,6 +166,13 @@ export const SETTINGS_REGISTRY = {
       description: 'Take an automatic daily database backup.',
     },
   },
+  learn: {
+    enabled: {
+      type: 'boolean',
+      default: true,
+      description: 'Watch-and-learn: passively learn answers from applications you fill yourself (on by default).',
+    },
+  },
   goals: {
     dailyTarget: {
       type: 'number',

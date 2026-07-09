@@ -201,6 +201,36 @@ describe('actuator — execute (§3.5)', () => {
     expect(res.error).toBe('not_found');
   });
 
+  it('refuses a mutating op with not_active when the tab is NOT in DRIVE mode (lease guard)', async () => {
+    // Structural anti-refresh invariant: a tab that isn't leased for a run can never click/fill/navigate.
+    setBody(`<form><label for="em4">Email</label><input id="em4" type="email" /></form>`);
+    const snap = buildSnapshot(document, 'ep_guard');
+    const email = snap.frames[0]!.nodes.find((n) => n.role === 'textbox')!;
+    const input = document.getElementById('em4') as HTMLInputElement;
+
+    for (const mode of ['dormant', 'observe'] as const) {
+      const res = await execute(
+        { op: 'fill', target: { nid: email.nid }, value: 'x@y.io', method: 'auto' },
+        { doc: document, epoch: 'ep_guard', mode },
+      );
+      expect(res.ok).toBe(false);
+      expect(res.error).toBe('not_active');
+      expect(input.value).toBe(''); // never touched the DOM
+    }
+
+    // a read-only op (snapshot) is still allowed outside drive — it observes, never mutates.
+    const read = await execute({ op: 'snapshot' }, { doc: document, epoch: 'ep_guard', mode: 'observe' });
+    expect(read.ok).toBe(true);
+
+    // and in DRIVE mode the same fill succeeds.
+    const drive = await execute(
+      { op: 'fill', target: { nid: email.nid }, value: 'x@y.io', method: 'auto' },
+      { doc: document, epoch: 'ep_guard', mode: 'drive' },
+    );
+    expect(drive.ok).toBe(true);
+    expect(input.value).toBe('x@y.io');
+  });
+
   it('chooseRadio scopes to the TARGET group when two groups share a "Yes"/"No" label', async () => {
     // Two independent yes/no questions on one page. A document-wide scan would pick the FIRST "Yes"
     // (the wrong group); chooseRadio must honor cmd.group and select within the addressed group only.

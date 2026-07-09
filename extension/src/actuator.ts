@@ -10,12 +10,24 @@ export interface ActuatorCtx {
   doc: Document;
   /** current epoch — stamped into every snapshotDelta so the app can match it to the live tab. */
   epoch: string;
+  /**
+   * The content-script's current lifecycle state. When present and NOT 'drive', every MUTATING op is
+   * refused with `not_active` — a tab that holds no lease can never click/fill/navigate a real page
+   * (the structural kill for the self-refresh bug class). Omitted (legacy/test callers) ⇒ no gate.
+   */
+  mode?: 'dormant' | 'drive' | 'observe';
   /** injectable clock/waiter so the executor is testable without real timers. */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
 
 const DEFAULT_POLL_MS = 100;
+
+/** Ops that change the page. Refused outside DRIVE mode. Read-only ops (snapshot/extractText/waitFor/
+ *  scroll) are always allowed — they observe, never mutate. */
+const MUTATING_OPS: ReadonlySet<Cmd['op']> = new Set([
+  'navigate', 'click', 'fill', 'selectOption', 'setChecked', 'chooseRadio', 'combobox', 'upload',
+]);
 
 /** Sidecar for extractText — the wire CmdResult carries no text field, so the content bridge reads
  *  this after an extractText result and relays it in an adapter-out-of-band channel if ever needed. */
@@ -112,6 +124,11 @@ function setValueReact(el: HTMLInputElement | HTMLTextAreaElement, value: string
 // the executor
 // ---------------------------------------------------------------------------
 export async function execute(cmd: Cmd, ctx: ActuatorCtx): Promise<CmdResult> {
+  // Structural lease guard: refuse to mutate a page the SW hasn't put in DRIVE mode. (When ctx.mode is
+  // undefined the caller opts out of the gate — legacy/unit-test paths that construct the ctx directly.)
+  if (ctx.mode !== undefined && ctx.mode !== 'drive' && MUTATING_OPS.has(cmd.op)) {
+    return fail('not_active');
+  }
   switch (cmd.op) {
     case 'navigate': {
       // The content script cannot cross-origin navigate reliably; the SW owns tab navigation. Here we

@@ -54,7 +54,7 @@ export function getElementsByGroup(group: number): Element[] {
 // type=password always redacts; any field whose resolved name matches this rx
 // redacts too. Kept in sync (by intent) with the app-side answers guard.
 // ---------------------------------------------------------------------------
-const SENSITIVE_RX =
+export const SENSITIVE_RX =
   /\b(ssn|social security|date of birth|dob|salary history|race|ethnic|gender|disabilit|veteran|sexual orientation|criminal|felony|convict)\b/i;
 
 // A leading loading token (v11.86). RAW name is kept; the app strips in ONE place.
@@ -213,7 +213,7 @@ function truncate(s: string, max: number): string {
   return clean.length > max ? clean.slice(0, max) : clean;
 }
 
-function accessibleName(el: Element): string {
+export function accessibleName(el: Element): string {
   const doc = el.ownerDocument;
 
   const ariaLabel = el.getAttribute('aria-label');
@@ -318,6 +318,45 @@ function resolveGroupPrompt(groupContainer: Element | null, sample: Element): st
 /** Group container for a radio/checkbox: closest fieldset or role=radiogroup/group. */
 function groupContainerOf(el: Element): Element | null {
   return el.closest('fieldset, [role="radiogroup"], [role="group"]');
+}
+
+// ---------------------------------------------------------------------------
+// recorder-facing reuse (OBSERVE mode). The passive recorder needs the SAME
+// label/redaction rules the sensor applies so a watched interaction is labeled
+// and redacted identically to a driven one — one source of truth, no drift.
+// ---------------------------------------------------------------------------
+
+/** The shared question text for a radio/checkbox group (fieldset legend / heading / aria). '' if none. */
+export function groupPromptFor(el: Element): string {
+  return resolveGroupPrompt(groupContainerOf(el), el);
+}
+
+/**
+ * The label the answer-memory keys on for a control: for a radio/checkbox it's the GROUP prompt (the
+ * question), not the option text; for everything else it's the accessible name. Falls back to the
+ * accessible name when a group prompt can't be resolved.
+ */
+export function resolveControlLabel(el: Element): string {
+  const role = roleOf(el);
+  if (role === 'radio' || role === 'checkbox') {
+    const prompt = groupPromptFor(el);
+    if (prompt) return prompt;
+  }
+  return accessibleName(el);
+}
+
+/**
+ * ABSOLUTE-redaction predicate, mirroring valueOf(): a control whose value must NEVER leave the page —
+ * type=password, or a name (resolved OR name-attr) matching the sensitive rx (SSN/DOB/salary-history/
+ * gender/race/disability/veteran/criminal/…). The recorder records the LABEL of such a field but never
+ * the value.
+ */
+export function isSensitiveControl(el: Element, name: string): boolean {
+  const type = (el.getAttribute('type') || '').toLowerCase();
+  if (type === 'password') return true;
+  if (SENSITIVE_RX.test(name)) return true;
+  if (SENSITIVE_RX.test(el.getAttribute('name') || '')) return true;
+  return false;
 }
 
 // ---------------------------------------------------------------------------

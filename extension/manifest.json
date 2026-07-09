@@ -14,6 +14,9 @@
   "host_permissions": [
     "*://*.linkedin.com/*",
     "*://*.indeed.com/*",
+    "*://boards.greenhouse.io/*",
+    "*://jobs.lever.co/*",
+    "*://jobs.ashbyhq.com/*",
     "http://127.0.0.1/*"
   ],
   "background": {
@@ -35,7 +38,10 @@
       "matches": [
         "*://*.linkedin.com/*",
         "*://*.indeed.com/*",
-        "*://smartapply.indeed.com/*"
+        "*://smartapply.indeed.com/*",
+        "*://boards.greenhouse.io/*",
+        "*://jobs.lever.co/*",
+        "*://jobs.ashbyhq.com/*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle",

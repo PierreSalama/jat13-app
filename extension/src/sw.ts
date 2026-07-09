@@ -32,16 +32,68 @@ const TOKEN_KEY = 'jat13Token'; // chrome.storage.local
 let socket: WebSocket | null = null;
 let controlSeq = 0; // sender-monotonic for control-plane envelopes (no runId)
 
+type TabMode = 'dormant' | 'drive' | 'observe';
+
 interface TabEntry {
   tabId: number;
   epoch: string;
   url: string;
   runId?: string;
   lane?: string;
+  mode?: TabMode;
+  sessionId?: string;
   port?: chrome.runtime.Port | undefined;
   createdAt: number;
 }
 const tabs = new Map<number, TabEntry>();
+
+// ---- watch-and-learn + cohesion state (pushed from the app; cached across SW wakes) ---------------
+/** An apply-surface matcher: host is a SUFFIX match; path (optional) is a substring of the URL. */
+interface ApplyHostPattern { host: string; path?: string }
+
+/** Default apply-surface patterns — the app's /api/learn/config overrides these on connect. Kept in
+ *  sync (by intent) with app/src/main/learn/index.ts APPLY_HOST_PATTERNS. */
+const DEFAULT_APPLY_HOSTS: ApplyHostPattern[] = [
+  { host: 'linkedin.com', path: '/apply' },
+  { host: 'smartapply.indeed.com' },
+  { host: 'indeed.com', path: 'apply' },
+  { host: 'greenhouse.io' },
+  { host: 'lever.co' },
+  { host: 'ashbyhq.com' },
+];
+
+let learnEnabled = true; // ON by default (Pierre); the app's config can turn it off.
+let applyHostPatterns: ApplyHostPattern[] = DEFAULT_APPLY_HOSTS;
+
+const BADGE_AMBER = '#f59e0b';
+const BADGE_RED = '#ef4444';
+let alarmTicks = 0; // config is refreshed every Nth alarm (a few minutes), not every 30s.
+
+function mintSessionId(): string {
+  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? `ls_${crypto.randomUUID()}`
+    : `ls_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+/** Does this URL look like a job-application surface we should passively learn from? */
+function isApplySurface(url: string): boolean {
+  let host = '';
+  let full = '';
+  try {
+    const u = new URL(url);
+    host = u.hostname;
+    full = u.pathname + u.search;
+  } catch {
+    return false;
+  }
+  for (const p of applyHostPatterns) {
+    const hostMatch = host === p.host || host.endsWith(`.${p.host}`);
+    if (!hostMatch) continue;
+    if (p.path === undefined) return true;
+    if (full.toLowerCase().includes(p.path.toLowerCase())) return true;
+  }
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // socket lifecycle
@@ -75,16 +127,20 @@ async function ensureSocket(): Promise<void> {
 
   socket.addEventListener('open', () => {
     void sendHello();
+    void fetchLearnConfig(); // sync the learn master-switch + apply-host patterns on connect
+    void refreshBadge(); // reflect the app's Needs-You count immediately
   });
   socket.addEventListener('message', (ev: MessageEvent) => {
     void onSocketMessage(ev.data);
   });
   socket.addEventListener('close', () => {
     socket = null; // the alarm watchdog re-opens it
+    setBadge('!', BADGE_RED); // disconnected — a small nudge that the brain is unreachable
   });
   socket.addEventListener('error', () => {
     try { socket?.close(); } catch { /* noop */ }
     socket = null;
+    setBadge('!', BADGE_RED);
   });
 }
 
@@ -129,6 +185,79 @@ async function snapshotTabRegistry(): Promise<Array<{ tabId: number; epoch: stri
     out.push(entry);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// loopback HTTP to the app (learning + cohesion). Reuses the SAME port + paired
+// token as the WebSocket. All best-effort: a failed fetch NEVER breaks anything.
+// ---------------------------------------------------------------------------
+const APP_ORIGIN = `http://127.0.0.1:${PORTS.app}`;
+
+async function appFetch(path: string, init?: RequestInit): Promise<Response | null> {
+  const token = await readToken();
+  if (!token) return null;
+  const headers = new Headers(init?.headers);
+  headers.set(IDENTITY.authHeader, token);
+  try {
+    return await fetch(`${APP_ORIGIN}${path}`, { ...init, headers });
+  } catch {
+    return null;
+  }
+}
+
+/** Pull the learn master-switch + apply-host patterns from the app; keep the cache on any failure. */
+async function fetchLearnConfig(): Promise<void> {
+  const res = await appFetch('/api/learn/config');
+  if (!res || !res.ok) return;
+  try {
+    const cfg = (await res.json()) as { enabled?: boolean; applyHosts?: ApplyHostPattern[] };
+    if (typeof cfg.enabled === 'boolean') learnEnabled = cfg.enabled;
+    if (Array.isArray(cfg.applyHosts) && cfg.applyHosts.length) {
+      applyHostPatterns = cfg.applyHosts.filter((p) => p && typeof p.host === 'string');
+    }
+  } catch {
+    /* keep the cached config */
+  }
+}
+
+/** POST a passively-observed batch to the app's distiller. Best-effort with ONE retry. */
+async function forwardObserved(body: unknown): Promise<void> {
+  const payload = JSON.stringify(body);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await appFetch('/api/learn/observe', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: payload,
+    });
+    if (res && res.ok) return;
+  }
+}
+
+/** COHESION: mirror the app's Needs-You count onto the toolbar badge (amber) so the user sees at a
+ *  glance when the brain needs them; clear on 0; a red '!' means the summary was unreachable. */
+async function refreshBadge(): Promise<void> {
+  const res = await appFetch('/api/summary');
+  if (!res || !res.ok) {
+    setBadge('!', BADGE_RED);
+    return;
+  }
+  try {
+    const s = (await res.json()) as { needsYou?: number };
+    const n = Number(s.needsYou) || 0;
+    if (n > 0) setBadge(n > 99 ? '99+' : String(n), BADGE_AMBER);
+    else setBadge('', BADGE_AMBER);
+  } catch {
+    setBadge('', BADGE_AMBER);
+  }
+}
+
+function setBadge(text: string, color: string): void {
+  try {
+    chrome.action.setBadgeBackgroundColor({ color });
+    chrome.action.setBadgeText({ text });
+  } catch {
+    /* action API unavailable (should never happen in MV3) */
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -233,6 +362,43 @@ function mintEpoch(): string {
 }
 
 // ---------------------------------------------------------------------------
+// state authority: the SW decides — and is the ONLY thing that decides — which of
+// the three lifecycle states a tab is in. A tab NEVER observes AND drives at once.
+//   • has a runId (leased by the app)                       → DRIVE
+//   • no run, learn ON, URL is an apply surface             → OBSERVE
+//   • otherwise                                             → DORMANT
+// An INTERNAL SW↔content port message (never the app wire protocol).
+// ---------------------------------------------------------------------------
+function sendControl(entry: TabEntry, kind: 'activate' | 'observe' | 'deactivate', body: Record<string, unknown>): void {
+  if (!entry.port) return;
+  try {
+    entry.port.postMessage({ v: PROTOCOL_VERSION, kind, seq: 0, body });
+  } catch {
+    handlePortDeath(entry, 'crash');
+  }
+}
+
+/** Assign (or re-assign) a tab's lifecycle state and tell its content port. Idempotent per hello. */
+function assignMode(entry: TabEntry): void {
+  if (entry.runId) {
+    entry.mode = 'drive';
+    delete entry.sessionId;
+    sendControl(entry, 'activate', { runId: entry.runId, epoch: entry.epoch });
+    return;
+  }
+  if (learnEnabled && isApplySurface(entry.url)) {
+    const sid = mintSessionId();
+    entry.mode = 'observe';
+    entry.sessionId = sid;
+    sendControl(entry, 'observe', { sessionId: sid });
+    return;
+  }
+  entry.mode = 'dormant';
+  delete entry.sessionId;
+  sendControl(entry, 'deactivate', {});
+}
+
+// ---------------------------------------------------------------------------
 // content Port: per-tab chrome.runtime Port named 'jat13.page'. The content
 // script connects on load/pageshow; the SW registers it, relays cmd_result and
 // events up, and treats a disconnect as page_gone (the resume backbone).
@@ -242,8 +408,9 @@ chrome.runtime.onConnect.addListener((port) => {
   const tabId = port.sender?.tab?.id;
   if (typeof tabId !== 'number') return;
 
-  // (re)bind the port to the tab entry; a real navigation mints a new epoch, a bfcache reconnect keeps
-  // the old one — the content script tells us which via its first 'ready' message.
+  // (re)bind the port to the tab entry. Epoch is owned by the SW: onConnect mints one for a fresh tab;
+  // webNavigation.onCommitted re-mints on a real navigation; a bfcache reconnect keeps the existing
+  // entry (and its epoch). The content script's first `hello` then triggers the state assignment.
   let entry = tabs.get(tabId);
   if (!entry) {
     entry = { tabId, epoch: mintEpoch(), url: port.sender?.url ?? '', createdAt: Date.now() };
@@ -276,6 +443,9 @@ interface PortFrame {
     reason?: PageGoneReason;
     dialogKind?: DialogKind;
     text?: string;
+    sessionId?: string;
+    host?: string;
+    events?: unknown[];
   } & Record<string, unknown>;
 }
 
@@ -285,13 +455,26 @@ async function onPortMessage(tabId: number, msg: unknown): Promise<void> {
   const env = msg as PortFrame;
 
   switch (env.kind) {
-    case 'ready': {
-      // content announces itself. committed:true = real navigation → mint a fresh epoch; otherwise
-      // (bfcache restore) keep the reported epoch so the app resumes rather than re-classifies fresh.
-      const reported = env.body?.epoch;
-      if (env.body?.committed || !reported) entry.epoch = mintEpoch();
-      else entry.epoch = reported;
+    case 'hello': {
+      // content announces itself on load / bfcache restore. The SW owns the epoch (minted by onConnect
+      // for a fresh tab, re-minted by webNavigation.onCommitted on a real nav), so hello just refreshes
+      // the URL and (re)assigns the tab's lifecycle state — DRIVE / OBSERVE / DORMANT.
+      if (typeof env.body?.url === 'string') entry.url = env.body.url;
+      assignMode(entry);
+      // keep the app's tab registry current (the app resumes leased tabs by epoch).
       sendEvent({ kind: 'hello', tabs: await snapshotTabRegistry() });
+      return;
+    }
+    case 'observed': {
+      // watch-and-learn uplink: forward the redacted batch to the app's distiller over loopback HTTP.
+      if (entry.mode !== 'observe') return; // ignore stray batches from a non-observe tab
+      const payload = {
+        sessionId: env.body?.sessionId ?? entry.sessionId ?? '',
+        url: env.body?.url ?? entry.url,
+        host: env.body?.host ?? '',
+        events: Array.isArray(env.body?.events) ? env.body?.events : [],
+      };
+      void forwardObserved(payload);
       return;
     }
     case 'page_ready': {
@@ -376,11 +559,18 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
 // watchdog: chrome.alarms re-opens a dead socket (eviction is normal). Also
 // reaps orphan apply tabs.
 // ---------------------------------------------------------------------------
+// ONE alarm drives every periodic job (reconnect + badge + config). Idempotent: chrome.alarms dedups
+// by name across SW wakes, so this never stacks duplicate timers (the freeze-over-time class).
 chrome.alarms.create(RECONNECT_ALARM, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== RECONNECT_ALARM) return;
   void ensureSocket();
   reapOrphanTabs();
+  // Cohesion: keep the toolbar badge in step with the app's Needs-You count (~every 30s).
+  if (socketAlive()) void refreshBadge();
+  // Refresh the learn config every ~3 minutes (every 6th 30s tick), not on every tick.
+  alarmTicks = (alarmTicks + 1) % 6;
+  if (alarmTicks === 0 && socketAlive()) void fetchLearnConfig();
 });
 
 function reapOrphanTabs(): void {
