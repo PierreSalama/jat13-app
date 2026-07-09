@@ -1,0 +1,85 @@
+{
+  "id": "greenhouse-form",
+  "version": 1,
+  "engineMin": "1.0.0",
+  "source": "greenhouse",
+  "hosts": ["boards.greenhouse.io", "job-boards.greenhouse.io", "*.greenhouse.io"],
+  "priority": 100,
+  "pages": [
+    {
+      "key": "form",
+      "kind": "form",
+      "classify": {
+        "any": [
+          { "selectorLike": { "attr": { "key": "id", "rx": "^application-form$|^application_form$|^main_fields$" } } },
+          { "textPresent": "apply for this job|submit application" },
+          { "fieldCount": { "min": 3, "radioAware": true } }
+        ],
+        "none": [{ "textPresent": "thank you for applying|application (has been|was) submitted" }]
+      },
+      "formRoot": [
+        { "kind": "attrRoot", "attr": { "key": "id", "rx": "application" } },
+        { "kind": "walkUpFromAdvance" },
+        { "kind": "radioAwareWhole" }
+      ],
+      "fill": { "requiredFirst": true, "fillOptional": false },
+      "parkIf": [
+        { "signal": { "textPresent": "r(e|é)sum(e|é)/cv is required|please (attach|upload) (your )?r(e|é)sum(e|é)|r(e|é)sum(e|é) required" }, "reason": "resume_required" }
+      ],
+      "next": ["form", "confirmation"]
+    },
+    {
+      "key": "confirmation",
+      "kind": "confirmation",
+      "classify": {
+        "any": [
+          { "textPresent": "thank you for applying|application (has been|was) submitted|we('| ha)ve received your application" }
+        ]
+      },
+      "next": []
+    }
+  ],
+  "fieldMap": [
+    { "labelRx": "first name|given name", "mapTo": "firstName" },
+    { "labelRx": "last name|surname|family name", "mapTo": "lastName" },
+    { "labelRx": "full name|^name$", "mapTo": "fullName" },
+    { "labelRx": "^email|e-?mail address", "mapTo": "email" },
+    { "labelRx": "(mobile |cell |work )?phone( number)?", "mapTo": "phone" },
+    { "labelRx": "location|city|current location", "mapTo": "location" },
+    { "labelRx": "linkedin( profile)?( url)?", "mapTo": "linkedinUrl" },
+    { "labelRx": "website|portfolio|personal (site|url)|github", "mapTo": "websiteUrl" },
+    { "labelRx": "r(e|é)sum(e|é)|^cv\\b|attach .* r(e|é)sum(e|é)", "mapTo": "@resume" },
+    { "labelRx": "cover letter|lettre de motivation", "mapTo": "@coverLetter" },
+    { "labelRx": "authori(s|z)ed to work|legally (able|eligible|entitled) to work|right to work|work.*authoriz", "grounded": "work_auth" },
+    { "labelRx": "sponsor(ship)?|require .* sponsor|visa sponsor", "grounded": "sponsorship" },
+    { "labelRx": "able to .* (perform|carry out) .* (duties|functions|job)|with(out)? .* accommodation", "grounded": "ability_to_perform" },
+    { "labelRx": "referr(ed|al)|referred by|how did you hear", "grounded": "referral_na" },
+    { "labelRx": "notice period|when can you start|availability to start|available to start", "grounded": "notice_period" },
+    { "labelRx": "gender|race|ethnicit|disab|veteran|criminal|convict|sexual orientation|national origin|hispanic", "neverAutofill": true }
+  ],
+  "advance": {
+    "labels": ["^submit application$", "^submit$", "^apply$"],
+    "finalLabels": ["^submit application$", "^submit$", "^apply$"],
+    "neverLabels": ["^apply for this job$", "^save\\b", "^add another"],
+    "disabledIsWaiting": true,
+    "waitEnabledMs": 15000,
+    "maxLabelLen": 40
+  },
+  "oracles": {
+    "success": [
+      { "id": "gh-thanks", "kind": "textPresent", "rx": "thank you for applying|application (has been|was) submitted", "level": "verified" }
+    ],
+    "failure": [
+      { "id": "gh-closed", "kind": "textPresent", "rx": "no longer accepting applications|this position (is|has been) (closed|filled)", "level": "verified" }
+    ],
+    "humanGate": [
+      { "id": "gh-captcha", "kind": "realCaptchaWidget" },
+      { "id": "gh-challenge", "kind": "challengeCopy", "rx": "verify (you'?re|you are) (a )?human|press and hold|security verification" }
+    ]
+  },
+  "limits": { "maxSteps": 4, "maxSameActionRepeat": 2 },
+  "quirks": {
+    "neverSelectByClass": "modern Greenhouse ids are random — map by LABEL text only, never class/id",
+    "labelsNotIds": "map fields by their visible label, not by field id"
+  }
+}

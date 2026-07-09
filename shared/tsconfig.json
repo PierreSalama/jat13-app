@@ -1,0 +1,12 @@
+{
+  "// note": "Type-check only (esbuild emits). No project references — composite/declaration off; tsc is a pure checker run per-project by `npm run typecheck`.",
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "noEmit": true,
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": ["src"]
+}

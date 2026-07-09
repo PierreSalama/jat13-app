@@ -1,0 +1,75 @@
+/* JAT v13 popup — same atelier mission-control identity as v11 (fixed brand palette so the
+   extension surfaces read as one identity regardless of dashboard theme). */
+:root {
+  --bg: #0a0a0a; --bg2: #141210; --panel: #1c1a18; --border: #3a342d;
+  --text: #f4efe6; --body: #d9d2c6; --muted: #8b8378;
+  --primary: #b08a5a; --primary2: #c9a373;
+  --ok: #7fae7f; --bad: #c25b5b; --warn: #c9a373;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  width: 344px;
+  overflow-x: hidden;
+  background:
+    radial-gradient(ellipse at top, color-mix(in srgb, var(--primary) 7%, transparent), transparent 62%),
+    var(--bg);
+  color: var(--body);
+  font: 500 13px "Inter", -apple-system, "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+button { font-family: inherit; cursor: pointer; }
+a { color: var(--primary2); }
+.muted { color: var(--muted); }
+
+/* header */
+.head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+}
+.brand { display: flex; align-items: baseline; gap: 8px; }
+.brand-mark { font-size: 18px; font-weight: 600; color: var(--text); letter-spacing: 0.06em; }
+.brand-version { font-size: 10px; letter-spacing: 0.2em; color: var(--muted); font-variant-numeric: tabular-nums; }
+.conn { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--muted); letter-spacing: 0.04em; }
+.conn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); transition: background 240ms var(--ease), box-shadow 240ms var(--ease); }
+.conn-dot.ok { background: var(--ok); box-shadow: 0 0 8px color-mix(in srgb, var(--ok) 60%, transparent); }
+.conn-dot.bad { background: var(--bad); }
+
+/* setup card (first run) */
+.setup {
+  padding: 18px 16px; border-bottom: 1px solid var(--border);
+  background:
+    radial-gradient(ellipse at top, color-mix(in srgb, var(--primary) 10%, transparent), transparent 70%);
+  display: grid; gap: 8px;
+}
+.setup-title { font-size: 14px; color: var(--text); font-weight: 600; }
+.setup-sub { font-size: 12px; color: var(--muted); line-height: 1.45; }
+.setup .btn { margin-top: 4px; }
+
+/* cards */
+.card { padding: 14px 16px; border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+.card-eyebrow {
+  font-size: 9px; letter-spacing: 0.3em; text-transform: uppercase;
+  color: var(--primary); font-weight: 500; margin-bottom: 10px;
+}
+.page-line { font-size: 12px; line-height: 1.4; margin-bottom: 12px; min-height: 18px; overflow-wrap: anywhere; }
+.page-line.ok { color: var(--ok); }
+.page-line.warn { color: var(--warn); }
+
+/* buttons */
+.btn {
+  display: block; width: 100%; text-align: center; text-decoration: none;
+  font-size: 10px; font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase;
+  padding: 10px 12px; border: 1px solid var(--border); background: transparent; color: var(--body);
+  border-radius: 4px; transition: border-color 200ms var(--ease), background 200ms var(--ease);
+}
+.btn:hover { border-color: var(--primary); }
+.btn.primary {
+  border-color: transparent; color: #14100a; font-weight: 600;
+  background: linear-gradient(135deg, var(--primary), var(--primary2));
+}
+.btn.primary:hover { filter: brightness(1.06); }
+
+.actions { padding: 12px 16px; display: grid; gap: 8px; }
+.hint { font-size: 11px; color: var(--muted); line-height: 1.4; }
+.foot { padding: 11px 16px; font-size: 10px; color: var(--muted); letter-spacing: 0.03em; }

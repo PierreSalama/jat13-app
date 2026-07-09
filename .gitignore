@@ -1,0 +1,11 @@
+node_modules/
+app/dist/
+app/out/
+extension/dist/
+tests/canary-runs/
+tests/fixtures/**/local-*
+*.local.*
+*.log
+.DS_Store
+# adapter/schema generated outputs are committed; build outputs are not
+app/release/

@@ -1,0 +1,39 @@
+{
+  "name": "jat13",
+  "version": "13.0.0",
+  "private": true,
+  "description": "JAT 13 (Aurora) — job auto-apply: thin extension + app brain, adapters-as-data. Ground-up rebuild of v11.",
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "app",
+    "extension"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node tools/dev.mjs",
+    "build": "node tools/build.mjs",
+    "build:ext": "node extension/build.mjs",
+    "rebuild:electron": "cd app && npx electron-rebuild -f -w better-sqlite3",
+    "rebuild:node": "npm rebuild better-sqlite3",
+    "dist": "npm run build && cd app && npx electron-builder --config electron-builder.yml",
+    "dist:publish": "npm run build && cd app && npx electron-builder --config electron-builder.yml --publish always",
+    "typecheck": "tsc -p shared/tsconfig.json && tsc -p app/tsconfig.json && tsc -p extension/tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "playwright test",
+    "gen:contracts": "node tools/gen-contracts.mjs",
+    "gates": "node tools/validate-versions.mjs --check && node tools/validate-extension.mjs && node tools/validate-adapters.mjs",
+    "stamp": "node tools/stamp-version.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.28.1",
+    "jsdom": "^29.1.1",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.10"
+  }
+}

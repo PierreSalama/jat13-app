@@ -1,0 +1,20 @@
+{
+  "// note": "Type-check only. esbuild emits all runtime JS (main/preload/extension); the renderer is bundled by esbuild too (vanilla + raw WebGL2 — no Svelte/Vite/three.js, per MASTER-PLAN C1/C2). tsc never runs in the runtime path.",
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "composite": true,
+    "declaration": true
+  }
+}

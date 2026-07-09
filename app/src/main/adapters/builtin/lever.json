@@ -1,0 +1,106 @@
+{
+  "id": "lever-form",
+  "version": 1,
+  "engineMin": "1.0.0",
+  "source": "lever",
+  "hosts": ["jobs.lever.co", "*.lever.co"],
+  "priority": 100,
+  "pages": [
+    {
+      "key": "job_view",
+      "kind": "jobView",
+      "classify": {
+        "all": [{ "url": "jobs\\.lever\\.co/[^/]+/[^/]+/?$" }],
+        "none": [
+          { "url": "/apply/?($|\\?)" },
+          { "url": "/thanks" }
+        ]
+      },
+      "onEnter": [
+        {
+          "action": "click",
+          "target": { "role": "link", "nameRx": "^apply( for this job| now)?$" },
+          "ifMissing": "classifyExternal"
+        }
+      ],
+      "next": ["form", "confirmation"]
+    },
+    {
+      "key": "form",
+      "kind": "form",
+      "classify": {
+        "any": [
+          { "url": "jobs\\.lever\\.co/.*/apply" },
+          { "selectorLike": { "attr": { "key": "nameAttr", "rx": "^(name|email|phone|org|resume)$|^urls\\[" } } },
+          { "fieldCount": { "min": 2, "radioAware": true } }
+        ],
+        "none": [{ "textPresent": "application submitted|thank you for applying" }]
+      },
+      "formRoot": [
+        { "kind": "attrRoot", "attr": { "key": "id", "rx": "^application-form$|^apply" } },
+        { "kind": "walkUpFromAdvance" },
+        { "kind": "radioAwareWhole" }
+      ],
+      "fill": { "requiredFirst": true, "fillOptional": false },
+      "parkIf": [
+        { "signal": { "textPresent": "r(e|é)sum(e|é)/cv is required|please (attach|upload) (your )?r(e|é)sum(e|é)|r(e|é)sum(e|é) required" }, "reason": "resume_required" }
+      ],
+      "next": ["form", "confirmation"]
+    },
+    {
+      "key": "confirmation",
+      "kind": "confirmation",
+      "classify": {
+        "any": [
+          { "url": "jobs\\.lever\\.co/.*/thanks" },
+          { "textPresent": "application submitted|thank you for applying|we('| ha)ve received your application" }
+        ]
+      },
+      "next": []
+    }
+  ],
+  "fieldMap": [
+    { "labelRx": "full name|^name$", "mapTo": "fullName" },
+    { "labelRx": "first name|given name", "mapTo": "firstName" },
+    { "labelRx": "last name|surname|family name", "mapTo": "lastName" },
+    { "labelRx": "^email|e-?mail address", "mapTo": "email" },
+    { "labelRx": "(mobile |cell |work )?phone( number)?", "mapTo": "phone" },
+    { "labelRx": "current company|organi(s|z)ation|employer", "mapTo": "currentCompany" },
+    { "labelRx": "location|city|current location", "mapTo": "location" },
+    { "labelRx": "linkedin( profile)?( url)?", "mapTo": "linkedinUrl" },
+    { "labelRx": "website|portfolio|personal (site|url)|github|other url", "mapTo": "websiteUrl" },
+    { "labelRx": "r(e|é)sum(e|é)|^cv\\b|attach .* r(e|é)sum(e|é)", "mapTo": "@resume" },
+    { "labelRx": "cover letter|lettre de motivation|additional information", "mapTo": "@coverLetter" },
+    { "labelRx": "authori(s|z)ed to work|legally (able|eligible|entitled) to work|right to work|work.*authoriz", "grounded": "work_auth" },
+    { "labelRx": "sponsor(ship)?|require .* sponsor|visa sponsor", "grounded": "sponsorship" },
+    { "labelRx": "able to .* (perform|carry out) .* (duties|functions|job)|with(out)? .* accommodation", "grounded": "ability_to_perform" },
+    { "labelRx": "referr(ed|al)|referred by|how did you hear", "grounded": "referral_na" },
+    { "labelRx": "notice period|when can you start|availability to start|available to start", "grounded": "notice_period" },
+    { "labelRx": "gender|race|ethnicit|disab|veteran|criminal|convict|sexual orientation|national origin|hispanic", "neverAutofill": true }
+  ],
+  "advance": {
+    "labels": ["^submit application$", "^submit$", "^apply$"],
+    "finalLabels": ["^submit application$", "^submit$", "^apply$"],
+    "neverLabels": ["^apply( for this job| now)?$", "^save\\b", "^add another"],
+    "disabledIsWaiting": true,
+    "waitEnabledMs": 15000,
+    "maxLabelLen": 40
+  },
+  "oracles": {
+    "success": [
+      { "id": "lv-thanks-url", "kind": "urlMatches", "rx": "jobs\\.lever\\.co/.*/thanks", "level": "verified" },
+      { "id": "lv-thanks-text", "kind": "textPresent", "rx": "application submitted|thank you for applying", "level": "verified" }
+    ],
+    "failure": [
+      { "id": "lv-closed", "kind": "textPresent", "rx": "no longer accepting applications|this posting (is|has been) (closed|filled)", "level": "verified" }
+    ],
+    "humanGate": [
+      { "id": "lv-captcha", "kind": "realCaptchaWidget" },
+      { "id": "lv-challenge", "kind": "challengeCopy", "rx": "verify (you'?re|you are) (a )?human|press and hold|security verification" }
+    ]
+  },
+  "limits": { "maxSteps": 5, "maxSameActionRepeat": 2 },
+  "quirks": {
+    "neverSelectByClass": "match Lever fields by name attr / label, never class"
+  }
+}

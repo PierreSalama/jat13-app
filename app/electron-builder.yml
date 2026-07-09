@@ -1,0 +1,52 @@
+# electron-builder — produces the Windows installer + the electron-updater feed (latest.yml) that lets
+# the app self-update to the newest version from GitHub Releases. Tag `v13.*` on PierreSalama/jat13-app
+# → CI (release.yml) runs `electron-builder --publish always` → installer + latest.yml on the release.
+appId: com.pierre.jat13
+productName: JAT 13
+copyright: © Pierre Salama
+
+directories:
+  output: release        # app/release/JAT 13 Setup <version>.exe
+  buildResources: build
+
+# Only the emitted bundle + package manifest + node_modules (electron-builder rebuilds native
+# better-sqlite3 for the Electron ABI automatically during packaging).
+files:
+  - dist/**/*
+  - package.json
+  - '!**/*.map'
+
+# Shipped beside the app so main.ts resolves them via process.resourcesPath (migrations + builtin adapters).
+extraResources:
+  - from: src/main/db/migrations
+    to: db/migrations
+    filter: ['**/*.sql']
+  - from: src/main/adapters/builtin
+    to: adapters/builtin
+    filter: ['**/*.json']
+
+# jat13:// deep-link scheme (the extension pairing hand-off opens the app).
+protocols:
+  - name: JAT 13
+    schemes: [jat13]
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: 'JAT-13-Setup-${version}.${ext}'
+
+nsis:
+  oneClick: false
+  perMachine: false                      # per-user install (no admin prompt)
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: JAT 13
+
+# electron-updater feed. Public repo → tokenless auto-update (guarantee #8: tokens rot, releases don't).
+publish:
+  - provider: github
+    owner: PierreSalama
+    repo: jat13-app
+    releaseType: release

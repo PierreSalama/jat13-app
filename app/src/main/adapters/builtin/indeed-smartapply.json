@@ -1,0 +1,165 @@
+{
+  "id": "indeed-smartapply",
+  "version": 1,
+  "engineMin": "1.0.0",
+  "source": "indeed",
+  "hosts": ["*.indeed.com", "smartapply.indeed.com"],
+  "priority": 100,
+  "pages": [
+    {
+      "key": "job_view",
+      "kind": "jobView",
+      "classify": {
+        "all": [{ "url": "indeed\\.com/(viewjob|jobs|m/|job/)" }],
+        "none": [
+          { "url": "smartapply\\.indeed\\.com" },
+          { "textPresent": "you('| ha)ve applied|application submitted" }
+        ]
+      },
+      "onEnter": [
+        {
+          "action": "click",
+          "target": { "role": "button", "nameRx": "^apply now\\b" },
+          "ifMissing": "classifyExternal"
+        },
+        {
+          "action": "click",
+          "target": { "role": "button", "nameRx": "^apply on company site\\b" },
+          "ifMissing": "classifyExternal"
+        }
+      ],
+      "next": ["sa_step", "sa_review", "external_posting", "cloudflare", "sa_done"]
+    },
+    {
+      "key": "external_posting",
+      "kind": "external",
+      "classify": {
+        "any": [
+          {
+            "selectorLike": {
+              "role": "link",
+              "nameRx": "^apply on company site",
+              "attr": { "key": "href", "rx": "^https?://(?!.*indeed\\.com)" }
+            }
+          },
+          {
+            "selectorLike": {
+              "role": "button",
+              "nameRx": "^apply on company site"
+            }
+          }
+        ]
+      },
+      "parkIf": [{ "signal": { "url": ".*" }, "reason": "external_redirect" }],
+      "next": []
+    },
+    {
+      "key": "cloudflare",
+      "kind": "wall",
+      "classify": {
+        "any": [
+          { "textPresent": "verify (you'?re|you are) (a )?human|checking your browser|press and hold|additional verification required" },
+          { "frameHost": "challenges\\.cloudflare\\.com" }
+        ]
+      },
+      "parkIf": [{ "signal": { "frameHost": "challenges\\.cloudflare\\.com" }, "reason": "cloudflare" }],
+      "next": ["sa_step", "sa_review"]
+    },
+    {
+      "key": "sa_step",
+      "kind": "form",
+      "classify": {
+        "all": [{ "url": "smartapply\\.indeed\\.com" }],
+        "none": [
+          { "url": "smartapply\\.indeed\\.com/.*/post-apply" },
+          { "buttonLabel": "^submit( your)? application$" }
+        ],
+        "any": [
+          { "selectorLike": { "attr": { "key": "testid", "rx": "smartapply-container|ia-container|form-container" } } },
+          { "fieldCount": { "min": 1, "radioAware": true } },
+          { "buttonLabel": "^continue$" }
+        ]
+      },
+      "formRoot": [
+        { "kind": "attrRoot", "attr": { "key": "testid", "rx": "smartapply-container|ia-container|form-container" } },
+        { "kind": "walkUpFromAdvance" },
+        { "kind": "radioAwareWhole" }
+      ],
+      "fill": { "requiredFirst": true, "fillOptional": true },
+      "parkIf": [
+        { "signal": { "textPresent": "upload (your )?r(e|é)sum(e|é)|r(e|é)sum(e|é) required|please (attach|upload) (your )?r(e|é)sum(e|é)" }, "reason": "resume_required" }
+      ],
+      "next": ["sa_step", "sa_review", "sa_done", "cloudflare"]
+    },
+    {
+      "key": "sa_review",
+      "kind": "review",
+      "classify": {
+        "all": [{ "url": "smartapply\\.indeed\\.com" }],
+        "any": [
+          { "buttonLabel": "^submit( your)? application$" },
+          { "textPresent": "review your application|please review" }
+        ]
+      },
+      "formRoot": [
+        { "kind": "walkUpFromAdvance" },
+        { "kind": "attrRoot", "attr": { "key": "testid", "rx": "smartapply-container|ia-container" } }
+      ],
+      "next": ["sa_done", "sa_step", "cloudflare"]
+    },
+    {
+      "key": "sa_done",
+      "kind": "confirmation",
+      "classify": {
+        "any": [
+          { "url": "smartapply\\.indeed\\.com/.*/post-apply" },
+          { "textPresent": "your application (has been|was) submitted|application submitted|you('| ha)ve applied" }
+        ]
+      },
+      "next": []
+    }
+  ],
+  "fieldMap": [
+    { "labelRx": "^email|e-?mail address", "mapTo": "email" },
+    { "labelRx": "(mobile |cell |work |phone )?phone( number)?|num(e|é)ro de t(e|é)l(e|é)phone", "mapTo": "phone" },
+    { "labelRx": "full name|^name$|legal name", "mapTo": "fullName" },
+    { "labelRx": "first name|given name", "mapTo": "firstName" },
+    { "labelRx": "last name|surname|family name", "mapTo": "lastName" },
+    { "labelRx": "city|location|where .* located", "mapTo": "location" },
+    { "labelRx": "authori(s|z)ed to work|legally (able|eligible|entitled) to work|right to work|work.*authoriz|autoris(e|é).* travail", "grounded": "work_auth" },
+    { "labelRx": "sponsor(ship)?|require .* sponsor|visa sponsor", "grounded": "sponsorship" },
+    { "labelRx": "able to .* (perform|carry out) .* (duties|functions|job)|with(out)? .* accommodation", "grounded": "ability_to_perform" },
+    { "labelRx": "referr(ed|al)|referred by|how did you hear", "grounded": "referral_na" },
+    { "labelRx": "notice period|when can you start|availability to start|available to start|pr(e|é)avis", "grounded": "notice_period" },
+    { "labelRx": "gender|race|ethnicit|disab|veteran|criminal|convict|sexual orientation|national origin", "neverAutofill": true }
+  ],
+  "advance": {
+    "labels": ["^continue$", "^next$", "^review( your application)?$", "^submit( your)? application$", "^continuer$", "^suivant$", "^soumettre"],
+    "finalLabels": ["^submit( your)? application$"],
+    "neverLabels": ["^apply now", "^apply on company site", "^easily apply", "^continue reading", "^continue as guest", "^save\\b", "^postuler"],
+    "disabledIsWaiting": true,
+    "waitEnabledMs": 11000,
+    "maxLabelLen": 40
+  },
+  "oracles": {
+    "success": [
+      { "id": "sa-post-apply-url", "kind": "urlMatches", "rx": "smartapply\\.indeed\\.com/.*/post-apply", "level": "grounded" },
+      { "id": "sa-submitted-text", "kind": "textPresent", "rx": "your application (has been|was) submitted|application submitted", "level": "verified" }
+    ],
+    "failure": [
+      { "id": "sa-expired", "kind": "textPresent", "rx": "this job has expired|no longer (available|accepting)", "level": "verified" }
+    ],
+    "humanGate": [
+      { "id": "cf-widget", "kind": "realCaptchaWidget" },
+      { "id": "cf-copy", "kind": "challengeCopy", "rx": "verify (you'?re|you are) (a )?human|checking your browser|press and hold|additional verification required" }
+    ]
+  },
+  "limits": { "maxSteps": 10, "maxSameActionRepeat": 2 },
+  "quirks": {
+    "neverSelectByClass": "indeed markup rotates — Signals use role/name/attrs only",
+    "warmTabReuse": true,
+    "cfClearanceTtlMin": 30,
+    "hostCooldownOnUnattendedCF_Min": 30,
+    "grounding": "being on smartapply.indeed.com IS the apply flow — the /post-apply URL is a grounded submit (v11.61)"
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "id": "ashby-form",
+  "version": 1,
+  "engineMin": "1.0.0",
+  "source": "ashby",
+  "hosts": ["jobs.ashbyhq.com", "*.ashbyhq.com"],
+  "priority": 100,
+  "pages": [
+    {
+      "key": "form",
+      "kind": "form",
+      "classify": {
+        "any": [
+          { "selectorLike": { "attr": { "key": "id", "rx": "^_systemfield_(name|email|phone|resume)$" } } },
+          { "selectorLike": { "attr": { "key": "id", "rx": "^form$" } } },
+          { "textPresent": "application|apply for this" },
+          { "fieldCount": { "min": 2, "radioAware": true } }
+        ],
+        "none": [{ "textPresent": "application (was |has been )?submitted|thank you for applying" }]
+      },
+      "formRoot": [
+        { "kind": "attrRoot", "attr": { "key": "id", "rx": "^form$" } },
+        { "kind": "walkUpFromAdvance" },
+        { "kind": "radioAwareWhole" }
+      ],
+      "fill": { "requiredFirst": true, "fillOptional": false },
+      "parkIf": [
+        { "signal": { "textPresent": "r(e|é)sum(e|é)/cv is required|please (attach|upload) (your )?r(e|é)sum(e|é)|r(e|é)sum(e|é) required" }, "reason": "resume_required" }
+      ],
+      "next": ["form", "confirmation"]
+    },
+    {
+      "key": "confirmation",
+      "kind": "confirmation",
+      "classify": {
+        "any": [
+          { "textPresent": "application (was |has been )?submitted|thank you for applying|success|we('| ha)ve received your application" }
+        ]
+      },
+      "next": []
+    }
+  ],
+  "fieldMap": [
+    { "labelRx": "full name|^name$", "mapTo": "fullName" },
+    { "labelRx": "first name|given name", "mapTo": "firstName" },
+    { "labelRx": "last name|surname|family name", "mapTo": "lastName" },
+    { "labelRx": "^email|e-?mail address", "mapTo": "email" },
+    { "labelRx": "(mobile |cell |work )?phone( number)?", "mapTo": "phone" },
+    { "labelRx": "location|city|current location", "mapTo": "location" },
+    { "labelRx": "linkedin( profile)?( url)?", "mapTo": "linkedinUrl" },
+    { "labelRx": "website|portfolio|personal (site|url)|github", "mapTo": "websiteUrl" },
+    { "labelRx": "r(e|é)sum(e|é)|^cv\\b|attach .* r(e|é)sum(e|é)", "mapTo": "@resume" },
+    { "labelRx": "cover letter|lettre de motivation", "mapTo": "@coverLetter" },
+    { "labelRx": "authori(s|z)ed to work|legally (able|eligible|entitled) to work|right to work|work.*authoriz", "grounded": "work_auth" },
+    { "labelRx": "sponsor(ship)?|require .* sponsor|visa sponsor", "grounded": "sponsorship" },
+    { "labelRx": "able to .* (perform|carry out) .* (duties|functions|job)|with(out)? .* accommodation", "grounded": "ability_to_perform" },
+    { "labelRx": "referr(ed|al)|referred by|how did you hear", "grounded": "referral_na" },
+    { "labelRx": "notice period|when can you start|availability to start|available to start", "grounded": "notice_period" },
+    { "labelRx": "gender|race|ethnicit|disab|veteran|criminal|convict|sexual orientation|national origin|hispanic", "neverAutofill": true }
+  ],
+  "advance": {
+    "labels": ["^submit application$", "^submit$"],
+    "finalLabels": ["^submit application$", "^submit$"],
+    "neverLabels": ["^save\\b", "^add another", "^upload"],
+    "disabledIsWaiting": true,
+    "waitEnabledMs": 15000,
+    "maxLabelLen": 40
+  },
+  "oracles": {
+    "success": [
+      { "id": "ab-submitted", "kind": "textPresent", "rx": "application (was |has been )?submitted|thank you for applying|success", "level": "verified" }
+    ],
+    "failure": [
+      { "id": "ab-closed", "kind": "textPresent", "rx": "no longer accepting applications|this (job|role|posting) (is|has been) (closed|filled)", "level": "verified" }
+    ],
+    "humanGate": [
+      { "id": "ab-captcha", "kind": "realCaptchaWidget" },
+      { "id": "ab-challenge", "kind": "challengeCopy", "rx": "verify (you'?re|you are) (a )?human|press and hold|security verification" }
+    ]
+  },
+  "limits": { "maxSteps": 5, "maxSameActionRepeat": 2 },
+  "quirks": {
+    "neverSelectByClass": "Ashby is a React SPA with no <form> element — ground on id:^form$, match fields by _systemfield_* id / label",
+    "reactControlled": true
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "// note": "Electron main/preload + renderer type-check. esbuild emits all runtime JS; tsc only checks. Also checks tests/ (they exercise app/src). electron ships its own types; better-sqlite3/ws via @types.",
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "noEmit": true,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node", "better-sqlite3", "ws"]
+  },
+  "include": ["src", "../tests"]
+}

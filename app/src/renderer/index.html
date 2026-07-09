@@ -1,0 +1,76 @@
+<!doctype html>
+<html data-theme="atelier" data-mode="dark">
+<head>
+  <meta charset="utf-8" />
+  <!-- CSP: scripts only from our own bundle; styles inline-allowed (theme vars); fetch restricted to
+       the loopback brain. No external hosts (no CDN/fonts) — the Atelier system ships self-hosted. -->
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src http://127.0.0.1:* http://localhost:*"
+  />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Job Application Tracker</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body data-theme="atelier" data-mode="dark">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">Atelier</div>
+      <div class="brand-text">
+        <h1 class="brand-title">JAT</h1>
+        <span class="brand-version" id="brand-version">v13</span>
+      </div>
+    </div>
+
+    <nav class="nav" id="nav">
+      <div class="nav-section">Track</div>
+      <a href="#/" class="nav-item" data-route="/">
+        <span class="nav-icon">◆</span><span class="nav-label">Dashboard</span>
+      </a>
+      <a href="#/applications" class="nav-item" data-route="/applications">
+        <span class="nav-icon">◇</span><span class="nav-label">Applications</span>
+      </a>
+      <a href="#/pipeline" class="nav-item" data-route="/pipeline">
+        <span class="nav-icon">▤</span><span class="nav-label">Pipeline</span>
+      </a>
+
+      <div class="nav-section">Automate</div>
+      <a href="#/queue" class="nav-item" data-route="/queue">
+        <span class="nav-icon">▶</span><span class="nav-label">Auto-apply</span>
+      </a>
+
+      <div class="nav-section">Material</div>
+      <a href="#/profile" class="nav-item" data-route="/profile">
+        <span class="nav-icon">●</span><span class="nav-label">Profile</span>
+      </a>
+      <a href="#/documents" class="nav-item" data-route="/documents">
+        <span class="nav-icon">▣</span><span class="nav-label">Documents</span>
+      </a>
+
+      <div class="nav-section">System</div>
+      <a href="#/activity" class="nav-item" data-route="/activity">
+        <span class="nav-icon">≋</span><span class="nav-label">Activity</span>
+      </a>
+      <a href="#/settings" class="nav-item" data-route="/settings">
+        <span class="nav-icon">⚙</span><span class="nav-label">Settings</span>
+      </a>
+    </nav>
+
+    <div class="sidebar-hint">Ctrl K — command palette</div>
+    <div class="sidebar-footer">
+      <div class="status-dot" id="runtime-dot"></div>
+      <div class="status-text" id="runtime-text">—</div>
+    </div>
+  </aside>
+
+  <main class="main" id="main">
+    <!-- views render here -->
+  </main>
+
+  <div id="app-banner"></div>
+  <div class="toasts" id="toasts"></div>
+  <div id="overlay-root"></div>
+
+  <script src="./main.js" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,142 @@
+{
+  "id": "linkedin-easy-apply",
+  "version": 1,
+  "engineMin": "1.0.0",
+  "source": "linkedin",
+  "hosts": ["*.linkedin.com"],
+  "priority": 100,
+  "pages": [
+    {
+      "key": "job_view",
+      "kind": "jobView",
+      "classify": {
+        "all": [{ "url": "/jobs/(view|collections)/" }],
+        "none": [
+          { "url": "/jobs/(view|collections)/[^/]+/apply" },
+          { "selectorLike": { "role": "dialog", "nameRx": "apply" } },
+          { "textPresent": "application (was )?sent" }
+        ]
+      },
+      "onEnter": [
+        {
+          "action": "click",
+          "target": { "role": "button", "nameRx": "^easy apply\\b" },
+          "ifMissing": "classifyExternal"
+        }
+      ],
+      "next": ["apply_modal", "apply_fullpage", "external_posting", "already_applied", "confirmation"]
+    },
+    {
+      "key": "already_applied",
+      "kind": "confirmation",
+      "classify": {
+        "any": [
+          { "textPresent": "applied (on|·|to)" },
+          { "textPresent": "you (have )?applied" },
+          { "selectorLike": { "role": "button", "nameRx": "^applied\\b" } }
+        ]
+      },
+      "next": []
+    },
+    {
+      "key": "external_posting",
+      "kind": "external",
+      "classify": {
+        "all": [
+          { "url": "/jobs/(view|collections)/" },
+          { "selectorLike": { "role": "button", "nameRx": "^apply\\b(?! to)" } }
+        ],
+        "none": [{ "buttonLabel": "^easy apply" }]
+      },
+      "parkIf": [{ "signal": { "url": ".*" }, "reason": "external_posting_fast_skip" }],
+      "next": []
+    },
+    {
+      "key": "apply_modal",
+      "kind": "form",
+      "classify": {
+        "any": [{ "selectorLike": { "role": "dialog", "nameRx": "apply" } }]
+      },
+      "formRoot": [{ "kind": "dialogRole" }],
+      "fill": { "requiredFirst": true, "fillOptional": true },
+      "next": ["apply_modal", "review", "confirmation"]
+    },
+    {
+      "key": "apply_fullpage",
+      "kind": "form",
+      "classify": {
+        "all": [{ "url": "/apply/?($|\\?|/)" }],
+        "any": [
+          { "buttonLabel": "^(next|review|submit application)$" },
+          { "textPresent": "\\d+\\s*/\\s*\\d+\\s*pages?" },
+          { "fieldCount": { "min": 1, "radioAware": true } }
+        ]
+      },
+      "formRoot": [{ "kind": "walkUpFromAdvance" }, { "kind": "radioAwareWhole" }],
+      "fill": { "requiredFirst": true, "fillOptional": true },
+      "next": ["apply_fullpage", "review", "confirmation"]
+    },
+    {
+      "key": "review",
+      "kind": "review",
+      "classify": {
+        "any": [
+          { "buttonLabel": "^submit application$" },
+          { "textPresent": "review your application" }
+        ]
+      },
+      "formRoot": [{ "kind": "walkUpFromAdvance" }, { "kind": "dialogRole" }],
+      "next": ["confirmation", "apply_fullpage", "apply_modal"]
+    },
+    {
+      "key": "confirmation",
+      "kind": "confirmation",
+      "classify": {
+        "any": [
+          { "textPresent": "application (was )?sent" },
+          { "textPresent": "your application was sent to" },
+          { "selectorLike": { "role": "dialog", "nameRx": "application sent" } },
+          { "url": "/jobs/(view|collections)/[^/]+/(post-apply|application-submitted)" }
+        ]
+      },
+      "next": []
+    }
+  ],
+  "fieldMap": [
+    { "labelRx": "email", "mapTo": "email" },
+    { "labelRx": "(mobile |cell |work )?phone( number)?", "mapTo": "phone" },
+    { "labelRx": "authori(s|z)ed to work|right to work|legally (able|eligible|entitled) to work", "grounded": "work_auth" },
+    { "labelRx": "sponsor(ship)?|require .* sponsor", "grounded": "sponsorship" },
+    { "labelRx": "able to .* (perform|carry out) .* (duties|functions|job)|with(out)? .* accommodation", "grounded": "ability_to_perform" },
+    { "labelRx": "referr(ed|al)|referred by", "grounded": "referral_na" },
+    { "labelRx": "notice period|when can you start|availability to start", "grounded": "notice_period" },
+    { "labelRx": "gender|race|ethnicit|disab|veteran|criminal|convict|sexual orientation", "neverAutofill": true }
+  ],
+  "advance": {
+    "labels": ["^continue$", "^next$", "^review( your application)?$", "^submit application$"],
+    "finalLabels": ["^submit application$"],
+    "neverLabels": ["^easy apply", "^save\\b", "^apply\\b(?! to)", "^postuler"],
+    "disabledIsWaiting": true,
+    "waitEnabledMs": 20000,
+    "maxLabelLen": 40
+  },
+  "oracles": {
+    "success": [
+      { "id": "li-post-apply-url", "kind": "urlMatches", "rx": "/jobs/(view|collections)/[^/]+/(post-apply|application-submitted)", "level": "grounded" },
+      { "id": "li-sent-text", "kind": "textPresent", "rx": "application (was )?sent", "level": "verified" },
+      { "id": "li-sent-to-text", "kind": "textPresent", "rx": "your application was sent to", "level": "verified" }
+    ],
+    "failure": [
+      { "id": "li-job-closed", "kind": "textPresent", "rx": "no longer accepting applications", "level": "verified" }
+    ],
+    "humanGate": [
+      { "id": "li-captcha", "kind": "realCaptchaWidget" },
+      { "id": "li-challenge", "kind": "challengeCopy", "rx": "verify (you'?re|you are) (a )?human|press and hold|security verification" }
+    ]
+  },
+  "limits": { "maxSteps": 14, "maxSameActionRepeat": 2 },
+  "quirks": {
+    "neverSelectByClass": "class names are obfuscated + rotating (_7a7f4435) — Signals use role/name/attrs only",
+    "accountCap": { "scope": "account", "budget": 45, "windowH": 24, "authority": "apply_ledger" }
+  }
+}

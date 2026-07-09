@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # native better-sqlite3 builds under the NODE abi here; vitest runs on node, so this is the
+      # abi the tests need (the Electron abi is only rebuilt at package time, never in CI checks).
+      - run: npm ci
+
+      - name: typecheck (tsc, no emit)
+        run: npm run typecheck
+
+      - name: test (vitest — unit + integration)
+        run: npm test
+
+      - name: build (esbuild bundle main + preload)
+        run: npm run build
+
+  # gate skeleton — validators are added as their milestones land (version drift M0.5, extension M1,
+  # adapters M6). Kept as a named, non-failing placeholder so the pipeline shape exists from day one.
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "gates placeholder — validate-versions/extension/adapters wire in per-milestone"

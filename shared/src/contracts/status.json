@@ -1,0 +1,80 @@
+{
+  "_note": "SINGLE SOURCE OF TRUTH for the app's vocabulary. tools/gen-contracts.mjs emits renderer fmt maps, main-process TS consts, and shared zod enums from this file (MASTER-PLAN C8). Edit here, never in generated outputs.",
+  "bundleVersion": "2026.07.07-1",
+
+  "applicationStatuses": {
+    "_order": ["tracked", "submitted", "acknowledged", "assessment", "interview_1", "interview_2", "interview_final", "offer", "hired", "rejected", "withdrawn", "ghosted"],
+    "terminal": ["hired", "rejected", "withdrawn"],
+    "labels": {
+      "tracked": "Tracked",
+      "submitted": "Submitted",
+      "acknowledged": "Acknowledged",
+      "assessment": "Assessment",
+      "interview_1": "Interview 1",
+      "interview_2": "Interview 2",
+      "interview_final": "Final interview",
+      "offer": "Offer",
+      "hired": "Hired",
+      "rejected": "Rejected",
+      "withdrawn": "Withdrawn",
+      "ghosted": "Ghosted"
+    }
+  },
+
+  "runStates": {
+    "_order": ["queued", "leased", "navigating", "classifying", "driving", "verifying", "waiting_page", "needs_human", "submitted", "ready_for_review", "parked", "skipped", "failed"],
+    "slotHolding": ["leased", "navigating", "classifying", "driving", "verifying", "waiting_page"],
+    "terminal": ["submitted", "ready_for_review", "parked", "skipped", "failed"],
+    "labels": {
+      "queued": "Queued",
+      "leased": "Leased",
+      "navigating": "Navigating",
+      "classifying": "Reading page",
+      "driving": "Driving form",
+      "verifying": "Verifying submit",
+      "waiting_page": "Waiting for page",
+      "needs_human": "Needs you",
+      "submitted": "Submitted",
+      "ready_for_review": "Ready for review",
+      "parked": "Parked",
+      "skipped": "Skipped",
+      "failed": "Failed"
+    }
+  },
+
+  "parkKinds": {
+    "_note": "matches apply_runs.park_kind CHECK in migration 001-core.",
+    "_order": ["needs_answer", "resume_required", "captcha", "cloudflare", "login", "account_wall", "awaiting_review", "external_redirect", "rate_limited", "other"],
+    "labels": {
+      "needs_answer": "Needs an answer",
+      "resume_required": "Résumé needed",
+      "captcha": "CAPTCHA — you solve it",
+      "cloudflare": "Cloudflare wall — you clear it",
+      "login": "Sign-in needed",
+      "account_wall": "Account required",
+      "awaiting_review": "Ready for review",
+      "external_redirect": "External site",
+      "rate_limited": "Rate limited",
+      "other": "Parked"
+    }
+  },
+
+  "evidenceKinds": {
+    "_note": "apply_runs.evidence_kind; state='submitted' requires a trustworthy kind BY CHECK CONSTRAINT (can't record a false submit). legacy_untrusted exists ONLY so the v11 importer can carry quarantined history honestly.",
+    "trustworthy": ["text_became_success", "new_confirmation_node", "confirm_signal", "url_confirmation", "modal_close_confirmed", "manual_confirmed"],
+    "untrustworthy": ["legacy_untrusted"]
+  },
+
+  "lanes": ["linkedin", "indeed", "ats"],
+  "sources": ["linkedin", "indeed", "greenhouse", "lever", "ashby"],
+
+  "patchbusEvents": [
+    "run.lane", "run.worker", "run.step",
+    "application.upsert", "application.status",
+    "needsyou.added", "needsyou.resolved",
+    "discovery.yield", "discovery.lane",
+    "inbox.email", "inbox.tokenHealth",
+    "scheduler.caps", "scheduler.breaker",
+    "adapter.health", "win.visibility"
+  ]
+}
