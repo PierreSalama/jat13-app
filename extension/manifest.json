@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JAT 13",
-  "version": "13.0.1",
+  "version": "13.0.2",
   "description": "JAT 13 — thin hands & eyes for the desktop brain. Sensor snapshots up, actuator commands down. No apply logic lives here.",
   "minimum_chrome_version": "116",
   "icons": {

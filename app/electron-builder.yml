@@ -34,7 +34,10 @@ win:
   target:
     - target: nsis
       arch: [x64]
-  artifactName: 'JAT-13-Setup-${version}.${ext}'
+  # STABLE (version-less) name so the extension downloads it from a PERMANENT url with no GitHub API:
+  #   https://github.com/PierreSalama/jat13-app/releases/latest/download/JAT-13-Setup.exe
+  # electron-updater still works — it reads the filename from latest.yml and the release tag scopes the url.
+  artifactName: 'JAT-13-Setup.${ext}'
 
 nsis:
   oneClick: false

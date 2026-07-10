@@ -7,7 +7,10 @@
   var TOKEN_KEY = 'jat13Token'; // MUST match sw.ts TOKEN_KEY
   var PORT_KEY = 'jat13Port';   // MUST match sw.ts PORT_KEY — the SW connects to the port we discover
   var RELEASES_PAGE = 'https://github.com/PierreSalama/jat13-app/releases/latest';
-  var RELEASES_API = 'https://api.github.com/repos/PierreSalama/jat13-app/releases/latest';
+  // PERMANENT direct-download url for the newest installer — no GitHub API call (that was failing behind
+  // rate limits / WARP), no repo page. GitHub redirects /releases/latest/download/<name> to the newest
+  // release's asset; the installer is named JAT-13-Setup.exe (version-less) so this url never changes.
+  var DIRECT_INSTALLER = 'https://github.com/PierreSalama/jat13-app/releases/latest/download/JAT-13-Setup.exe';
 
   var $ = function (id) { return document.getElementById(id); };
   var conn = { dot: $('conn-dot'), text: $('conn-text') };
@@ -19,46 +22,30 @@
 
   var state = { port: 0, token: '', tab: null, connected: false };
   var retryTimer = null;
-  var installerUrl = ''; // the DIRECT .exe asset url, resolved from the latest release
 
   function setConn(ok, text) {
     conn.dot.className = 'conn-dot ' + (ok ? 'ok' : 'bad');
     conn.text.textContent = text;
   }
 
-  // resolve the DIRECT .exe asset of the newest release. Returns a Promise<url|''> and caches it.
-  function resolveInstallerUrl() {
-    return fetch(RELEASES_API).then(function (r) { return r.ok ? r.json() : null; }).then(function (rel) {
-      if (!rel || !rel.assets) return '';
-      var exe = rel.assets.find(function (a) { return /\.exe$/i.test(a.name); });
-      if (!exe) return '';
-      installerUrl = exe.browser_download_url;
-      var btn = $('btn-download'); if (btn) btn.textContent = 'Download ' + rel.tag_name + ' (.exe)';
-      return installerUrl;
-    }).catch(function () { return ''; });
-  }
-
-  // Download the installer DIRECTLY (no navigation, no repo page) via chrome.downloads. If GitHub is
-  // unreachable we tell the user — we never dump them on the repo.
+  // Download the installer DIRECTLY from the permanent url via chrome.downloads — no navigation, no repo
+  // page, no GitHub API. Falls back to opening the same .exe url in a tab (still downloads) if the
+  // downloads API is unavailable.
   function startDownload() {
     var hint = $('download-hint');
-    if (hint) hint.textContent = 'Fetching the latest installer…';
-    var have = installerUrl ? Promise.resolve(installerUrl) : resolveInstallerUrl();
-    have.then(function (url) {
-      if (!url) {
-        if (hint) hint.innerHTML = 'Could not reach GitHub — <a href="' + RELEASES_PAGE + '" target="_blank" rel="noopener">open releases</a>.';
-        return;
-      }
-      chrome.downloads.download({ url: url, saveAs: false }, function () {
+    if (hint) hint.textContent = 'Downloading the installer…';
+    try {
+      chrome.downloads.download({ url: DIRECT_INSTALLER, saveAs: false }, function () {
         if (chrome.runtime.lastError) {
-          // fallback: open the direct .exe url in a tab (still downloads — NOT the repo page)
-          try { chrome.tabs.create({ url: url }); } catch (e) { /* noop */ }
+          try { chrome.tabs.create({ url: DIRECT_INSTALLER }); } catch (e) { /* noop */ }
           if (hint) hint.textContent = 'Starting download…';
         } else if (hint) {
-          hint.textContent = 'Downloading — check your downloads, then run the installer.';
+          hint.textContent = 'Downloading — check your downloads bar, then run the installer.';
         }
       });
-    });
+    } catch (e) {
+      try { chrome.tabs.create({ url: DIRECT_INSTALLER }); } catch (e2) { /* noop */ }
+    }
   }
 
   async function api(path, opts) {
@@ -103,7 +90,6 @@
     setupRow.hidden = false;
     pageCard.hidden = true;
     actionsRow.hidden = true;
-    if (!installerUrl) resolveInstallerUrl(); // pre-resolve once (don't re-hit GitHub on every retry)
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = setTimeout(probe, 1500);
   }

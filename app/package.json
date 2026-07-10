@@ -1,6 +1,6 @@
 {
   "name": "jat13-app",
-  "version": "13.0.1",
+  "version": "13.0.2",
   "private": true,
   "type": "module",
   "description": "JAT 13 desktop app — the brain. Electron main (scheduler, apply engine, better-sqlite3, Hono server on 7860) + preload + vanilla/WebGL2 renderer.",

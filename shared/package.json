@@ -1,6 +1,6 @@
 {
   "name": "@jat13/shared",
-  "version": "13.0.1",
+  "version": "13.0.2",
   "private": true,
   "type": "module",
   "description": "Contract package imported by app AND extension AND tests: wire protocol, adapter schema, status vocabulary, constants, normalizers. The single source of truth that makes contract-drift a compile error.",
