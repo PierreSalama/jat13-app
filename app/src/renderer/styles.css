@@ -242,7 +242,7 @@ kbd {
 
 /* the scrolling view region */
 .view { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
-.view-pad { padding: 26px 28px 40px; display: flex; flex-direction: column; gap: 20px; min-width: 0; max-width: 1320px; }
+.view-pad { padding: 26px 28px 40px; display: flex; flex-direction: column; gap: 20px; min-width: 0; max-width: 1600px; margin-inline: auto; width: 100%; }
 
 /* page head */
 .page-head { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
@@ -502,6 +502,16 @@ select.inp { cursor: pointer; }
 .doc-actions { display: flex; gap: 8px; flex: none; }
 .upload-zone { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-top: 1px solid var(--hair); flex-wrap: wrap; }
 .upload-zone .grow { flex: 1; min-width: 120px; }
+/* styled file picker — the native <input type=file> is hidden; this label drives it */
+.file-pick { display: inline-flex; align-items: center; gap: 12px; cursor: pointer; min-width: 0; }
+.file-btn {
+  display: inline-flex; align-items: center; gap: 8px; padding: 9px 14px; border-radius: 9px;
+  border: 1px solid var(--hair); background: var(--inset); color: var(--ink); font-size: 12.5px;
+  white-space: nowrap; transition: border-color .15s, background .15s, color .15s;
+}
+.file-pick:hover .file-btn { border-color: rgba(201, 163, 115, .42); color: var(--bronze-hi); }
+.file-name { font-size: 12px; color: var(--ink-faint); font-style: italic; font-family: var(--serif); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
+.file-name.has { color: var(--ink); font-style: normal; font-family: var(--sans); }
 
 /* ============================================================================
    INBOX / ACTIVITY rows

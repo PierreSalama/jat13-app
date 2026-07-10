@@ -28,6 +28,9 @@ function normalizeGoneReason(r: string | undefined): PageGoneReason {
 const RECONNECT_ALARM = 'jat13.reconnect';
 const APPLY_WINDOW_KEY = 'jat13.applyWindowId';
 const TOKEN_KEY = 'jat13Token'; // chrome.storage.local
+const PORT_KEY = 'jat13Port'; //  the popup stores the port it discovered (prod 7860 / dev 7861) so the
+//                                SW's WS + HTTP hit the SAME app the popup paired with — no hardcoded port.
+let appPort: number = PORTS.app; // refreshed from storage before each connect; defaults to the prod port
 
 let socket: WebSocket | null = null;
 let controlSeq = 0; // sender-monotonic for control-plane envelopes (no runId)
@@ -108,6 +111,15 @@ async function readToken(): Promise<string | null> {
   }
 }
 
+/** Refresh `appPort` from the port the popup discovered (falls back to the prod port). */
+async function readPort(): Promise<void> {
+  try {
+    const got = await chrome.storage.local.get(PORT_KEY);
+    const p = got[PORT_KEY];
+    if (typeof p === 'number' && p > 0) appPort = p;
+  } catch { /* keep current */ }
+}
+
 function socketAlive(): boolean {
   return !!socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING);
 }
@@ -116,8 +128,9 @@ async function ensureSocket(): Promise<void> {
   if (socketAlive()) return;
   const token = await readToken();
   if (!token) return; // unpaired → stay idle; the popup/pairing flow sets the token later.
+  await readPort(); // connect to the SAME app the popup paired with (prod 7860 / dev 7861)
 
-  const url = `ws://127.0.0.1:${PORTS.app}${IDENTITY.wsPath}?token=${encodeURIComponent(token)}`;
+  const url = `ws://127.0.0.1:${appPort}${IDENTITY.wsPath}?token=${encodeURIComponent(token)}`;
   try {
     socket = new WebSocket(url);
   } catch {
@@ -191,15 +204,14 @@ async function snapshotTabRegistry(): Promise<Array<{ tabId: number; epoch: stri
 // loopback HTTP to the app (learning + cohesion). Reuses the SAME port + paired
 // token as the WebSocket. All best-effort: a failed fetch NEVER breaks anything.
 // ---------------------------------------------------------------------------
-const APP_ORIGIN = `http://127.0.0.1:${PORTS.app}`;
-
 async function appFetch(path: string, init?: RequestInit): Promise<Response | null> {
   const token = await readToken();
   if (!token) return null;
+  await readPort();
   const headers = new Headers(init?.headers);
   headers.set(IDENTITY.authHeader, token);
   try {
-    return await fetch(`${APP_ORIGIN}${path}`, { ...init, headers });
+    return await fetch(`http://127.0.0.1:${appPort}${path}`, { ...init, headers });
   } catch {
     return null;
   }

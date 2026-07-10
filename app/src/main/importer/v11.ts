@@ -218,6 +218,15 @@ function mapApplicationStatus(v11: unknown): string {
   return V12_APPLICATION_STATUSES.has(s) ? s : 'tracked';
 }
 
+/** Pre-submit statuses that a recorded submit must override — a job with a real submitted_at can't
+ *  keep showing as "Saved". v11 often stored the applied timestamp but left the status pre-submit;
+ *  this reconciles the two so the Applications list + the funnel agree. */
+const PRE_SUBMIT = new Set(['tracked']);
+function reconcileStatus(mapped: string, submittedAt: number | null): string {
+  if (submittedAt != null && PRE_SUBMIT.has(mapped)) return 'submitted';
+  return mapped;
+}
+
 // ---- evidence trust test (ported from v11's isTrustworthyEvidence quarantine logic) ---------------
 
 const V12_EVIDENCE_KINDS = new Set([
@@ -605,7 +614,7 @@ function buildReport(src: SourceHandle, v12db: DB | null): ImportReport {
     const applId = `appl_v11_${id}`;
     if (!existsInV12(v12db, 'SELECT 1 FROM applications WHERE id = ?', applId)) {
       applToCreate++;
-      const st = mapApplicationStatus(col(j, shapes.jobs!, 'status'));
+      const st = reconcileStatus(mapApplicationStatus(col(j, shapes.jobs!, 'status')), toEpochMs(col(j, shapes.jobs!, 'submitted_at')));
       byStatus[st] = (byStatus[st] ?? 0) + 1;
     }
   }
@@ -682,10 +691,13 @@ function buildReport(src: SourceHandle, v12db: DB | null): ImportReport {
   let eventsCreate = 0;
   const droppedKinds: Record<string, number> = {};
   for (const ev of eventRows) {
-    const kind = mapEventKind(col(ev, shapes.events!, 'kind'));
+    // v11 events column is `type`, not `kind` — the plan must read the SAME fallback execute uses,
+    // else the dry-run report falsely says every event will be dropped as 'unknown'.
+    const rawKind = col(ev, shapes.events!, 'kind') ?? col(ev, shapes.events!, 'type');
+    const kind = mapEventKind(rawKind);
     if (kind) eventsCreate++;
     else {
-      const k = String(col(ev, shapes.events!, 'kind') ?? 'unknown');
+      const k = String(rawKind ?? 'unknown');
       droppedKinds[k] = (droppedKinds[k] ?? 0) + 1;
     }
   }
@@ -756,7 +768,8 @@ function mapEventKind(kind: unknown): string | null {
   if (s === 'progressing' || s === 'progress') return null; // internal churn, not a user-facing event
   if (s === 'apply' || s === 'submit' || s === 'submitted') return 'submitted';
   if (s === 'import') return 'imported';
-  if (s === 'matched' || s === 'emailmatch') return 'email_matched';
+  if (s === 'matched' || s === 'emailmatch' || s === 'email') return 'email_matched'; // v11 gmail.js emits type:'email'
+  if (s === 'resume_tailored' || s === 'resume' || s === 'tailored') return 'note'; // v11 AI resume-tailoring timeline entry
   return null;
 }
 
@@ -833,7 +846,7 @@ function importJobsAndApplications(ctx: WriteCtx): void {
   for (const p of profileRows) {
     const id = String(col(p, shapes.profiles!, 'id') ?? '');
     if (!id) continue;
-    const created = toEpochMs(col(p, shapes.profiles!, 'created_at')) ?? now();
+    const created = toEpochMs(col(p, shapes.profiles!, 'created_at')) ?? toEpochMs(col(p, shapes.profiles!, 'updated_at')) ?? now();
     const updated = toEpochMs(col(p, shapes.profiles!, 'updated_at')) ?? created;
     // Only ONE row may have is_default=1 (partial unique index). Honor v11's default; others → 0.
     const isDefault = id === defaultProfileId ? 1 : 0;
@@ -928,13 +941,14 @@ function importJobsAndApplications(ctx: WriteCtx): void {
 
     // one application per job
     const applId = `appl_v11_${id}`;
+    const submittedAt = toEpochMs(col(j, jobShape, 'submitted_at'));
     insAppl.run({
       id: applId,
       job_id: id,
       profile_id: resolver.resolve(col(j, jobShape, 'source')),
-      status: mapApplicationStatus(col(j, jobShape, 'status')),
+      status: reconcileStatus(mapApplicationStatus(col(j, jobShape, 'status')), submittedAt),
       via: 'import',
-      submitted_at: toEpochMs(col(j, jobShape, 'submitted_at')),
+      submitted_at: submittedAt,
       answers_json: jsonOrDefault(col(j, jobShape, 'answers'), '[]', CAP.answersJson),
       attachments_json: jsonOrDefault(col(j, jobShape, 'attachments'), '[]', CAP.attachmentsJson),
       notes: clampOrNull(col(j, jobShape, 'notes'), 16384),
@@ -970,7 +984,7 @@ function importAnswers(ctx: WriteCtx): void {
     const profileId = String(col(f, fieldShape, 'profile_id') ?? '');
     if (!profileId) continue;
     const locked = Number(col(f, fieldShape, 'locked') ?? 0) === 1 ? 1 : 0;
-    const created = toEpochMs(col(f, fieldShape, 'created_at')) ?? now();
+    const created = toEpochMs(col(f, fieldShape, 'created_at')) ?? toEpochMs(col(f, fieldShape, 'updated_at')) ?? now();
     insAnswer.run({
       id: String(col(f, fieldShape, 'id') ?? ctx.newId('ans')),
       profile_id: profileId,
@@ -1002,7 +1016,7 @@ function importAnswers(ctx: WriteCtx): void {
     if (isSensitiveKey(keyNorm)) continue;
     const profileId = String(col(q, qaShape, 'profile_id') ?? '');
     if (!profileId) continue;
-    const created = toEpochMs(col(q, qaShape, 'created_at')) ?? now();
+    const created = toEpochMs(col(q, qaShape, 'created_at')) ?? toEpochMs(col(q, qaShape, 'updated_at')) ?? now();
     insAnswer.run({
       id: String(col(q, qaShape, 'id') ?? ctx.newId('ans')),
       profile_id: profileId,
@@ -1259,14 +1273,18 @@ function importRuns(ctx: WriteCtx): void {
     const route = mapRoute(col(t, shape, 'apply_route') ?? col(t, shape, 'route'));
     const created = toEpochMs(col(t, shape, 'created_at') ?? col(t, shape, 'queued_at')) ?? now();
     const finished = toEpochMs(col(t, shape, 'finished_at') ?? col(t, shape, 'updated_at')) ?? created;
+    // v11 auto_apply_tasks has NO source column — source lives on the joined job. Deriving it from the
+    // task row silently stamped every Indeed/ATS run as 'linkedin'; read the authoritative job source.
+    const jobSource = (v12db.prepare('SELECT source FROM jobs WHERE id = ?').get(jobId) as { source?: string } | undefined)?.source
+      ?? (col(t, shape, 'source') as string | undefined);
 
     insRun.run({
       id: `run_v11_${taskId}`,
       application_id: applId,
       job_id: jobId,
       profile_id: appl.profile_id,
-      source: clampStr(col(t, shape, 'source') ?? 'linkedin', 64) || 'linkedin',
-      lane: mapLane(col(t, shape, 'source'), route),
+      source: clampStr(jobSource ?? 'linkedin', 64) || 'linkedin',
+      lane: mapLane(jobSource, route),
       state: decision.state,
       route,
       attempt: intOr(col(t, shape, 'attempts') ?? col(t, shape, 'attempt'), 1),

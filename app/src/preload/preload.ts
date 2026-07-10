@@ -9,6 +9,7 @@ interface AppConfig {
   token: string;
   version: string;
   dev: boolean;
+  devtools?: boolean;
 }
 
 contextBridge.exposeInMainWorld('jat13', {

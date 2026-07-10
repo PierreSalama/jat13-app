@@ -1,6 +1,6 @@
 {
   "name": "jat13-extension",
-  "version": "13.0.0",
+  "version": "13.0.1",
   "private": true,
   "type": "module",
   "description": "JAT 13 thin MV3 extension — stateless hands & eyes (sensor snapshots up, actuator commands down). Zero runtime deps; @jat13/shared is bundled in by esbuild. Load-unpacked target: extension/dist.",

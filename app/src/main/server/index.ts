@@ -11,8 +11,8 @@ import type { Context } from 'hono';
 import { serve } from '@hono/node-server';
 import type { ServerType } from '@hono/node-server';
 import type { Database } from 'better-sqlite3';
-import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, existsSync, statSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
 import { PORTS, PROTOCOL_VERSION, IDENTITY } from '@jat13/shared';
 
 export interface ServerDeps {
@@ -30,19 +30,50 @@ export interface ServerDeps {
   rendererDir?: string;
 }
 
-/** Serve the renderer's static files at the API's own origin (no CORS). */
+const MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.map': 'application/json',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+};
+
+/**
+ * Serve the renderer's static files at the API's own origin (no CORS) so the dashboard opens in a
+ * plain browser tab, not just the Electron window. Serves the WHOLE renderer dir generically — the
+ * old hard-coded whitelist 404'd any file it forgot (e.g. lib/icons.js), which blank-screened the
+ * browser dashboard. Path is resolved + confined under `dir` (no `..` traversal escape).
+ */
 function mountStatic(app: Hono, dir: string): void {
-  const file = (rel: string, type: string) => (c: { body: (b: Buffer, s: number, h: Record<string, string>) => Response; notFound: () => Response | Promise<Response> }) => {
-    const p = join(dir, rel);
-    if (!existsSync(p)) return c.notFound();
-    return c.body(readFileSync(p), 200, { 'content-type': type, 'cache-control': 'no-store' });
+  const root = resolve(dir);
+  const send = (rel: string): Response | null => {
+    const p = resolve(root, '.' + (rel.startsWith('/') ? rel : '/' + rel));
+    if (p !== root && !p.startsWith(root + sep)) return null; // traversal guard
+    if (!existsSync(p) || !statSync(p).isFile()) return null;
+    const ext = p.slice(p.lastIndexOf('.')).toLowerCase();
+    return new Response(new Uint8Array(readFileSync(p)), {
+      status: 200,
+      headers: { 'content-type': MIME[ext] ?? 'application/octet-stream', 'cache-control': 'no-store' },
+    });
   };
-  app.get('/', file('index.html', 'text/html; charset=utf-8'));
-  app.get('/index.html', file('index.html', 'text/html; charset=utf-8'));
-  app.get('/main.js', file('main.js', 'text/javascript; charset=utf-8'));
-  app.get('/main.js.map', file('main.js.map', 'application/json'));
-  app.get('/styles.css', file('styles.css', 'text/css; charset=utf-8'));
-  app.get('/lib/themes.js', file('lib/themes.js', 'text/javascript; charset=utf-8'));
+  const indexHtml = (c: Context): Response | Promise<Response> => send('index.html') ?? c.notFound();
+  app.get('/', indexHtml);
+  // any other path → the matching file under the renderer dir, else the SPA index (hash-routed app).
+  app.get('/*', (c) => {
+    const path = new URL(c.req.url).pathname;
+    if (path === '/' || path.startsWith('/api') || path === '/health' || path === '/drive') return c.notFound();
+    return send(decodeURIComponent(path)) ?? indexHtml(c);
+  });
 }
 
 export interface HealthBody {

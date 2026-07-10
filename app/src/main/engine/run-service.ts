@@ -10,11 +10,28 @@ import { driveRun, type DriveOutcome } from './runner.js';
 import { makeResolver, makeAiAwareResolver } from './answer-resolver.js';
 import type { AiService } from '../ai/index.js';
 import type { Registry } from '../adapters/registry.js';
+import type { RunLane, EnqueueInput } from '../db/dal/runs.js';
 import { LINKEDIN_DAILY_CAP } from '@jat13/shared';
 
 const DAY_MS = 86_400_000;
 /** Rolling per-account submit caps (apply_ledger is the authority; parallelism can't stack past these). */
 const CAP_BY_SOURCE: Record<string, number> = { linkedin: LINKEDIN_DAILY_CAP };
+
+/** Route a job source onto one of the three drive lanes. */
+function laneFor(source: string): RunLane {
+  const s = (source || '').toLowerCase();
+  if (s.includes('linkedin')) return 'linkedin';
+  if (s.includes('indeed')) return 'indeed';
+  return 'ats'; // greenhouse / lever / ashby / everything else
+}
+
+interface EligibleRow {
+  application_id: string;
+  job_id: string;
+  profile_id: string | null;
+  source: string;
+  job_url: string;
+}
 
 export interface RunServiceDeps {
   dal: Dal;
@@ -24,6 +41,8 @@ export interface RunServiceDeps {
   ai?: AiService;
   /** ms between idle polls for a queued run. */
   pollMs?: number;
+  /** keep this many runs queued (the pump tops up from eligible applications). Default 20. */
+  queueTarget?: number;
   now?: () => number;
   log?: (msg: string) => void;
 }
@@ -32,6 +51,8 @@ export interface RunService {
   start(): void;
   stop(): void;
   isRunning(): boolean;
+  /** top the queue up to `queueTarget` from eligible applications; returns how many runs were enqueued. */
+  pump(): number;
   /** drive exactly one queued run if present; returns its outcome or null when the queue is empty. */
   driveNext(): Promise<DriveOutcome | null>;
 }
@@ -41,6 +62,7 @@ export function makeRunService(deps: RunServiceDeps): RunService {
   const now = deps.now ?? Date.now;
   const log = deps.log ?? (() => {});
   const pollMs = deps.pollMs ?? 4000;
+  const queueTarget = deps.queueTarget ?? 20;
   let running = false;
   let inFlight = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -60,6 +82,48 @@ export function makeRunService(deps: RunServiceDeps): RunService {
   function overCap(source: string): boolean {
     const cap = CAP_BY_SOURCE[source];
     return cap !== undefined && submitsInWindow(source) >= cap;
+  }
+
+  // THE queue populator (the piece that was missing — the driver had nothing to drive). When auto-apply
+  // is on, top the queue up to `queueTarget` from applications that are: still just Saved (never applied),
+  // on a host we actually have an adapter for, with NO existing run, and whose source is under its cap.
+  // Newest-tracked first, so fresh discoveries lead. The driver leases what this enqueues.
+  function pump(): number {
+    const depth = dal.runs.listLean({ state: 'queued', limit: 1 }).total;
+    const need = queueTarget - depth;
+    if (need <= 0) return 0;
+    const rows = dal.ctx.db
+      .prepare(
+        `SELECT a.id AS application_id, a.job_id AS job_id, a.profile_id AS profile_id, j.source AS source, j.job_url AS job_url
+           FROM applications a JOIN jobs j ON j.id = a.job_id
+          WHERE a.status = 'tracked' AND a.submitted_at IS NULL
+            AND j.job_url IS NOT NULL AND j.job_url <> ''
+            AND NOT EXISTS (SELECT 1 FROM apply_runs r WHERE r.application_id = a.id)
+          ORDER BY a.updated_at DESC
+          LIMIT 80`,
+      )
+      .all() as EligibleRow[];
+
+    let enq = 0;
+    for (const r of rows) {
+      if (enq >= need) break;
+      const adapter = registry.resolveForUrl(r.job_url);
+      if (!adapter) continue; // no adapter for this host — skip enqueuing (don't flood the queue with sure-skips)
+      if (overCap(r.source)) continue; // source at its rolling cap — leave it queued-worthy for later
+      const input: EnqueueInput = {
+        source: r.source,
+        lane: laneFor(r.source),
+        jobId: r.job_id,
+        profileId: r.profile_id || defaultProfileId(),
+        adapterId: adapter.id,
+        adapterVersion: adapter.version,
+        mode: 'auto',
+      };
+      dal.runs.enqueue(r.application_id, input);
+      enq++;
+    }
+    if (enq) log(`pump: enqueued ${enq} run(s) (queue ${depth}→${depth + enq}, target ${queueTarget})`);
+    return enq;
   }
 
   async function driveNext(): Promise<DriveOutcome | null> {
@@ -125,6 +189,7 @@ export function makeRunService(deps: RunServiceDeps): RunService {
     if (!running || inFlight) return;
     inFlight = true;
     try {
+      pump(); // keep the queue fed from eligible applications, THEN drive the oldest queued run
       const outcome = await driveNext();
       if (outcome) log(`run finished: ${outcome.state}`);
     } catch (e) {
@@ -149,6 +214,7 @@ export function makeRunService(deps: RunServiceDeps): RunService {
       log('run-service stopped');
     },
     isRunning: () => running,
+    pump,
     driveNext,
   };
 }

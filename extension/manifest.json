@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JAT 13",
-  "version": "13.0.0",
+  "version": "13.0.1",
   "description": "JAT 13 — thin hands & eyes for the desktop brain. Sensor snapshots up, actuator commands down. No apply logic lives here.",
   "minimum_chrome_version": "116",
   "icons": {
@@ -10,7 +10,13 @@
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   },
-  "permissions": ["tabs", "scripting", "storage", "alarms", "webNavigation"],
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms",
+    "webNavigation"
+  ],
   "host_permissions": [
     "*://*.linkedin.com/*",
     "*://*.indeed.com/*",
@@ -43,7 +49,9 @@
         "*://jobs.lever.co/*",
         "*://jobs.ashbyhq.com/*"
       ],
-      "js": ["content.js"],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     }

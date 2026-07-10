@@ -5,6 +5,7 @@
 (function () {
   var PORTS = [7860, 7861]; // prod, then dev
   var TOKEN_KEY = 'jat13Token'; // MUST match sw.ts TOKEN_KEY
+  var PORT_KEY = 'jat13Port';   // MUST match sw.ts PORT_KEY — the SW connects to the port we discover
   var RELEASES_PAGE = 'https://github.com/PierreSalama/jat13-app/releases/latest';
   var RELEASES_API = 'https://api.github.com/repos/PierreSalama/jat13-app/releases/latest';
 
@@ -16,7 +17,8 @@
   var pageStatus = $('page-status');
   var captureHint = $('capture-hint');
 
-  var state = { port: 0, token: '', tab: null };
+  var state = { port: 0, token: '', tab: null, connected: false };
+  var retryTimer = null;
 
   function setConn(ok, text) {
     conn.dot.className = 'conn-dot ' + (ok ? 'ok' : 'bad');
@@ -45,7 +47,7 @@
   }
 
   async function probe() {
-    setConn(false, 'checking…');
+    if (!state.connected) setConn(false, 'checking…');
     for (var i = 0; i < PORTS.length; i++) {
       try {
         var ctrl = new AbortController();
@@ -57,7 +59,10 @@
         if (body && body.token) {
           state.port = PORTS[i];
           state.token = body.token;
-          await chrome.storage.local.set({ [TOKEN_KEY]: body.token }); // SW auto-connects on this change
+          state.connected = true;
+          if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+          // store BOTH token + port so the SW connects to the same app we paired with (prod/dev)
+          await chrome.storage.local.set({ [TOKEN_KEY]: body.token, [PORT_KEY]: PORTS[i] }); // SW auto-connects on this change
           setConn(true, 'app connected' + (PORTS[i] === 7861 ? ' (dev)' : ''));
           setupRow.hidden = true;
           pageCard.hidden = false;
@@ -67,12 +72,17 @@
         }
       } catch (e) { /* next port */ }
     }
-    // app not reachable → setup card with the direct download
+    // app not reachable → setup card with the direct download. Keep RETRYING while the popup is open,
+    // so if the app is still booting (or the user just launched it) we connect on our own — no more
+    // "finish setup" showing next to a running app, and no manual retry click needed.
+    state.connected = false;
     setConn(false, 'app not running');
     setupRow.hidden = false;
     pageCard.hidden = true;
     actionsRow.hidden = true;
     resolveInstallerUrl();
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = setTimeout(probe, 1500);
   }
 
   async function describeTab() {
@@ -104,8 +114,13 @@
     }
   });
 
+  // Open dashboard: front the native window AND open the browsable dashboard in a tab. The tab is the
+  // reliable path (the native window may be on another monitor / already focused, which read as "nothing
+  // happened"), and it's exactly the "website version of the dashboard" that was previously unreachable.
   $('btn-open').addEventListener('click', function () {
+    if (!state.connected || !state.port) return;
     api('/app/front', { method: 'POST' }).catch(function () {});
+    try { chrome.tabs.create({ url: 'http://127.0.0.1:' + state.port + '/' }); } catch (e) { /* ignore */ }
     window.close();
   });
 

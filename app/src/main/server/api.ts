@@ -20,6 +20,8 @@ export interface ApiDeps {
   discovery: DiscoveryService;
   token: string;
   version: string;
+  /** dev-drive (in-app remote control test channel) is mounted — advertise it so the renderer starts its poller. */
+  devtools?: boolean;
   /** mount extra routes on the AUTHED /api sub-app (e.g. the Gmail routes). */
   extend?: (api: Hono) => void;
   /** override the "is v11 running?" gate (tests inject a deterministic stub). */
@@ -52,7 +54,7 @@ export function mountApi(app: Hono, deps: ApiDeps): void {
   // --- public: the loopback pairing hand-off (extension popup fetches the token on a user click) ---
   const pub = new Hono();
   pub.get('/pair/token', (c) =>
-    c.json({ token: deps.token, productName: IDENTITY.productName, version: deps.version, protocol: PROTOCOL_VERSION }),
+    c.json({ token: deps.token, productName: IDENTITY.productName, version: deps.version, protocol: PROTOCOL_VERSION, devtools: deps.devtools === true }),
   );
   app.route('/api', pub);
 
@@ -136,7 +138,7 @@ export function mountApi(app: Hono, deps: ApiDeps): void {
   });
 
   // ---- documents: real management (upload / download / set-default / delete) ----
-  api.get('/documents', (c) => c.json({ rows: dal.documents.listLean() }));
+  api.get('/documents', (c) => c.json(dal.documents.listLean())); // {rows,total} — NOT re-wrapped (double-wrap hid the list)
   api.post('/documents', async (c) => {
     // multipart upload: file + optional role/label. The browser FormData carries the bytes.
     const form = await c.req.formData();

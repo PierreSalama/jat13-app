@@ -2,7 +2,7 @@
 // the loopback server (REST API + /drive ws gateway), starts the run-service, opens the Aurora window.
 // Structural law 3/5: one process owns the DB, the port, and the socket; a second instance must never
 // race it — hence the single-instance lock.
-import { app, BrowserWindow, ipcMain, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, safeStorage, shell, Tray, Menu, nativeImage } from 'electron';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Database } from 'better-sqlite3';
@@ -20,6 +20,7 @@ import { makeAiService } from './ai/index.js';
 import { makeDiscoveryService } from './discovery/service.js';
 import { makeLearnDistiller } from './learn/distiller.js';
 import { mountLearnApi } from './learn/index.js';
+import { makeDevDrive } from './server/devdrive.js';
 import { IDENTITY } from '@jat13/shared';
 
 /** v11 sealed values are `enc:v1:` + base64(DPAPI); same OS user → v13 safeStorage decrypts them. */
@@ -37,9 +38,15 @@ function unsealV11(stored: string): string {
 const HERE = dirname(fileURLToPath(import.meta.url)); // dist/main at runtime
 const DEV = !app.isPackaged || process.env.JAT_DEV === '1';
 const SMOKE = process.env.JAT_SMOKE === '1'; // headless boot proof: migrate, serve, self-check, exit
+// dev-drive: the in-app remote-control test channel. On for dev builds, or opt-in via env for a
+// packaged build. Loopback + token still guard it; it never touches the apply/data path.
+const DEVTOOLS = DEV || process.env.JAT_DEVTOOLS === '1';
 
 let server: RunningServer | undefined;
 let db: Database | undefined;
+let mainWindow: BrowserWindow | undefined;
+let tray: Tray | undefined;
+let quitting = false; // true only when the user chose Quit — lets window-all-closed keep the brain alive otherwise
 
 if (!SMOKE && !app.requestSingleInstanceLock()) app.exit(0);
 
@@ -77,6 +84,7 @@ async function boot(): Promise<void> {
   const discovery = makeDiscoveryService({ dal, discoveryDal: dal.discovery, spacingMs: 1500, log: (m) => console.log(`[discovery] ${m}`) });
   const learnDistiller = makeLearnDistiller({ dal });
   const openExternal = (url: string): Promise<void> => shell.openExternal(url);
+  const devDrive = DEVTOOLS ? makeDevDrive({ getWindow: () => mainWindow, log: (m) => console.log(`[devdrive] ${m}`) }) : undefined;
 
   server = await startServer({
     db,
@@ -93,27 +101,22 @@ async function boot(): Promise<void> {
         discovery,
         token,
         version: app.getVersion(),
+        devtools: DEVTOOLS,
         unsealV11,
         extend: (api) => {
           mountGmailApi(api, gmail, dal);
           mountGmailConnectApi(api, dal, { openExternal, log: (m) => console.log(`[gmail] ${m}`) });
           mountLearnApi(api, dal, learnDistiller);
+          devDrive?.mount(api);
         },
-        frontWindow: () => {
-          const [win] = BrowserWindow.getAllWindows();
-          if (win) {
-            if (win.isMinimized()) win.restore();
-            win.show();
-            win.focus();
-          } else {
-            createWindow();
-          }
-        },
+        frontWindow: frontOrCreate,
       }),
   });
   gmail.start(); // scheduled status sync — dormant until a Gmail account is connected (OAuth is a user step)
   discovery.start(); // per-lane ATS sourcing (gated on settings.discovery.enabled)
   gateway.attach(server.server as unknown as import('node:http').Server); // ws /drive on the same loopback server
+
+  createTray(); // keep the brain alive when the window is closed (fixes: popup 'finish setup', dead dashboard)
 
   console.log(`[jat13] db schema v${opened.migration.to} @ ${dbFile}`);
   console.log(`[jat13] brain on http://127.0.0.1:${server.port}${DEV ? ' (dev)' : ''} · ${registry.all().length} adapter(s)`);
@@ -121,7 +124,7 @@ async function boot(): Promise<void> {
 
   ipcMain.handle('app:ping', () => ({ ok: true, version: app.getVersion() }));
   // the renderer fetches the loopback API with this token (loopback-only, local-trusted)
-  ipcMain.handle('app:config', () => ({ port: server?.port ?? 0, token, version: app.getVersion(), dev: DEV }));
+  ipcMain.handle('app:config', () => ({ port: server?.port ?? 0, token, version: app.getVersion(), dev: DEV, devtools: DEVTOOLS }));
 
   if (SMOKE) {
     const res = await fetch(`http://127.0.0.1:${server.port}/health`);
@@ -133,6 +136,42 @@ async function boot(): Promise<void> {
   }
 
   createWindow();
+}
+
+/** Raise the existing window (restoring/showing it), or recreate it if it was closed. Used by the
+ *  popup "Open dashboard" and the tray — works even after the window was closed because the tray now
+ *  keeps the process alive. */
+function frontOrCreate(): void {
+  const [win] = BrowserWindow.getAllWindows();
+  if (win) {
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  } else {
+    createWindow();
+  }
+}
+
+/** The system tray — the reason the app can survive a closed window. Its presence lets
+ *  `window-all-closed` keep the loopback brain (server + static dashboard + /drive gateway) running,
+ *  so the extension stays connected and http://127.0.0.1:PORT/ stays reachable. */
+function createTray(): void {
+  if (tray) return;
+  let img = nativeImage.createFromPath(join(HERE, 'icon.ico'));
+  if (!img.isEmpty()) img = img.resize({ width: 16, height: 16 });
+  tray = new Tray(img);
+  tray.setToolTip('JAT 13 — running in the background');
+  const rebuild = (): void =>
+    tray?.setContextMenu(
+      Menu.buildFromTemplate([
+        { label: 'Open dashboard', click: () => frontOrCreate() },
+        { label: 'Open in browser', click: () => void shell.openExternal(`http://127.0.0.1:${server?.port ?? 7860}/`) },
+        { type: 'separator' },
+        { label: 'Quit JAT 13', click: () => { quitting = true; app.quit(); } },
+      ]),
+    );
+  rebuild();
+  tray.on('click', () => frontOrCreate()); // left-click the tray = show the dashboard
 }
 
 function createWindow(): void {
@@ -147,6 +186,8 @@ function createWindow(): void {
       nodeIntegration: false,
     },
   });
+  mainWindow = win;
+  win.on('closed', () => { if (mainWindow === win) mainWindow = undefined; });
   void win.loadFile(join(HERE, '..', 'renderer', 'index.html'));
 }
 
@@ -165,9 +206,13 @@ app.on('second-instance', () => {
   }
 });
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  // Do NOT quit on window close — the tray keeps the brain (loopback server + dashboard + gateway) alive
+  // so the extension stays connected and the browsable dashboard stays reachable. Quit only via the
+  // tray's "Quit" (which sets `quitting`). If the tray failed to create, fall back to old quit-on-close.
+  if (quitting || !tray) app.quit();
 });
 app.on('before-quit', () => {
+  quitting = true;
   void shutdown();
 });
 

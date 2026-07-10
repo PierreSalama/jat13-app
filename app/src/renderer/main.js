@@ -53,6 +53,12 @@ const STATUS_DOT = {
   offer: 'bronze', hired: 'sage', rejected: 'danger', withdrawn: 'dim', ghosted: 'dim',
 };
 const TERMINAL_STATUS = new Set(['rejected', 'withdrawn', 'ghosted', 'hired']);
+// email category → short human badge (never show the raw enum like APPLICATION_CONFIRMATION)
+const MAIL_CAT_LABEL = {
+  application_confirmation: 'Confirmation', application_ack: 'Acknowledged', interview: 'Interview',
+  assessment: 'Assessment', rejection: 'Rejection', offer: 'Offer', recruiter: 'Recruiter', other: 'Other',
+};
+const mailCat = (c) => (c ? (MAIL_CAT_LABEL[c] || String(c).replace(/_/g, ' ')) : '');
 const RUN_STATE = {
   queued: { label: 'Queued', pct: 8 }, leased: { label: 'Starting', pct: 16 },
   navigating: { label: 'Reading page', pct: 32 }, classifying: { label: 'Reading page', pct: 46 },
@@ -77,7 +83,7 @@ function statusBadge(status) { return `<span class="sbadge"><span class="dot ${S
 // bootstrap config + pairing token
 // ---------------------------------------------------------------------------
 const state = {
-  base: 'http://127.0.0.1:7860', token: null, version: '', online: false,
+  base: 'http://127.0.0.1:7860', token: null, version: '', online: false, devtools: false,
   applying: false, needsYou: 0, settings: null, profileId: null, profileName: 'Pierre Salama',
   gmail: null, routeGen: 0,
 };
@@ -89,6 +95,7 @@ async function bootstrap() {
       if (cfg?.port) state.base = `http://127.0.0.1:${cfg.port}`;
       if (cfg?.token) state.token = cfg.token;
       if (cfg?.version) state.version = cfg.version;
+      if (cfg?.devtools) state.devtools = true;
       if (state.token) return true;
     } catch { /* fall through to probe */ }
   }
@@ -97,7 +104,7 @@ async function bootstrap() {
       const res = await fetch(`http://127.0.0.1:${port}/api/pair/token`, { signal: AbortSignal.timeout(1500) });
       if (!res.ok) continue;
       const body = await res.json();
-      if (body?.token) { state.base = `http://127.0.0.1:${port}`; state.token = body.token; state.version = body.version || ''; return true; }
+      if (body?.token) { state.base = `http://127.0.0.1:${port}`; state.token = body.token; state.version = body.version || ''; state.devtools = !!body.devtools; return true; }
     } catch { /* try next port */ }
   }
   return false;
@@ -327,8 +334,10 @@ function updateGmailChip(g) {
   const acct = g?.accounts?.[0];
   if (!acct) { chip.classList.add('hidden'); return; }
   chip.classList.remove('hidden');
-  const ok = acct.tokenState === 'ok' || acct.tokenState === 'valid' || acct.enabled;
-  chip.innerHTML = `${icon('mail', 13)}<span class="dot ${ok ? 'sage' : 'ember'}" style="width:6px;height:6px"></span> Gmail ${ok ? 'connected' : (acct.tokenState || 'idle')}${acct.lastOkAt ? ` <span class="mono">${fmtAgo(acct.lastOkAt)} ago</span>` : ''}`;
+  // "connected" must mean a LIVE token — an imported-but-unauthorized account is `enabled` yet cannot
+  // sync, so `enabled` alone must NOT read as connected (that was the misleading chip).
+  const ok = acct.tokenState === 'ok' || acct.tokenState === 'valid';
+  chip.innerHTML = `${icon('mail', 13)}<span class="dot ${ok ? 'sage' : 'ember'}" style="width:6px;height:6px"></span> Gmail ${ok ? 'connected' : 'not connected'}${ok && acct.lastOkAt ? ` <span class="mono">${fmtAgo(acct.lastOkAt)} ago</span>` : ''}`;
 }
 
 async function toggleApplying(force) {
@@ -713,7 +722,7 @@ async function openTimelineDrawer(row) {
     else html += `<div class="tl-wrap">${events.map((e) => `<div class="tl"><span class="tdot"></span><div class="th">${esc(e.summary || e.kind)}</div><div class="tm">${esc(e.kind)} · ${fmtDateTime(e.at)}${e.source ? ' · ' + esc(e.source) : ''}</div></div>`).join('')}</div>`;
     if (emails.length) {
       html += `<div class="drawer-sec">Matched emails</div>`;
-      html += emails.map((m) => `<div class="mail"><span class="dot sage mdot"></span><div class="mb"><div class="subj">${esc(m.subject || '(no subject)')}</div><div class="from">${esc(m.from_name || m.from_addr || '')}</div>${m.snippet ? `<div class="snip">${esc(m.snippet)}</div>` : ''}</div>${m.category ? `<span class="mcat">${esc(m.category)}</span>` : ''}</div>`).join('');
+      html += emails.map((m) => `<div class="mail"><span class="dot sage mdot"></span><div class="mb"><div class="subj">${esc(m.subject || '(no subject)')}</div><div class="from">${esc(m.from_name || m.from_addr || '')}</div>${m.snippet ? `<div class="snip">${esc(m.snippet)}</div>` : ''}</div>${m.category ? `<span class="mcat">${esc(mailCat(m.category))}</span>` : ''}</div>`).join('');
     }
     body.innerHTML = html;
   } catch (e) { const body = $('#dr-body'); if (body) body.innerHTML = `<div class="empty">Could not load timeline — ${esc(e.message)}</div>`; }
@@ -1062,15 +1071,23 @@ async function renderDocuments(view) {
       <div class="card-h"><span class="cap">Library</span><div class="spacer"></div><span class="aside" id="doc-count">—</span></div>
       <div id="doc-list">${loadingRow()}</div>
       <div class="upload-zone">
-        <input type="file" id="doc-file" class="inp" style="padding:7px 10px" />
-        <select class="inp grow" id="doc-role" style="max-width:200px"><option value="resume">Résumé</option><option value="cover_letter">Cover letter</option><option value="portfolio">Portfolio</option><option value="transcript">Transcript</option><option value="other">Other</option></select>
-        <input class="inp grow" id="doc-label" placeholder="Label (optional)" style="max-width:240px" />
+        <label class="file-pick" for="doc-file">
+          <span class="file-btn">${icon('upload', 13)} Choose file</span>
+          <span class="file-name" id="doc-file-name">No file selected</span>
+        </label>
+        <input type="file" id="doc-file" hidden />
+        <select class="inp" id="doc-role" style="max-width:180px"><option value="resume">Résumé</option><option value="cover_letter">Cover letter</option><option value="portfolio">Portfolio</option><option value="transcript">Transcript</option><option value="other">Other</option></select>
+        <input class="inp" id="doc-label" placeholder="Label (optional)" style="max-width:220px" />
         <button class="btn primary" id="doc-upload">${icon('upload', 13)} Upload</button>
       </div>
     </div>
   </div>`);
   view.appendChild(pad);
   $('#doc-upload').addEventListener('click', uploadDocument);
+  $('#doc-file').addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    const n = $('#doc-file-name'); if (n) { n.textContent = f ? f.name : 'No file selected'; n.classList.toggle('has', !!f); }
+  });
   await loadDocuments();
 }
 async function loadDocuments() {
@@ -1106,7 +1123,7 @@ async function uploadDocument() {
   fd.append('role', $('#doc-role').value);
   const label = $('#doc-label').value.trim(); if (label) fd.append('label', label);
   const btn = $('#doc-upload'); if (btn) { btn.disabled = true; btn.textContent = 'Uploading…'; }
-  try { await api('/documents', { method: 'POST', formData: fd, timeoutMs: 60000 }); toast('Uploaded', 'success', 2500); fileInput.value = ''; $('#doc-label').value = ''; await loadDocuments(); }
+  try { await api('/documents', { method: 'POST', formData: fd, timeoutMs: 60000 }); toast('Uploaded', 'success', 2500); fileInput.value = ''; $('#doc-label').value = ''; const n = $('#doc-file-name'); if (n) { n.textContent = 'No file selected'; n.classList.remove('has'); } await loadDocuments(); }
   catch (e) { errToast(e, 'Upload'); }
   finally { if (btn) { btn.disabled = false; btn.innerHTML = `${icon('upload', 13)} Upload`; } }
 }
@@ -1145,7 +1162,7 @@ async function loadEmails(category) {
   } catch (e) { if (!e?.aborted) { const box = $('#mail-list'); if (box) box.innerHTML = `<div class="empty">Could not load emails — ${esc(e.message)}</div>`; } }
 }
 function mailRow(m, suggestion) {
-  return `<div class="mail"><span class="dot ${suggestion ? 'ember' : 'sage'} mdot"></span><div class="mb"><div class="subj">${esc(m.subject || '(no subject)')}</div><div class="from">${esc(m.from_name || m.from_addr || '')}</div>${m.snippet ? `<div class="snip">${esc(m.snippet)}</div>` : ''}</div>${m.category ? `<span class="mcat">${esc(m.category)}</span>` : ''}<span class="mtime">${fmtAgo(m.sent_at || m.created_at)}</span></div>`;
+  return `<div class="mail"><span class="dot ${suggestion ? 'ember' : 'sage'} mdot"></span><div class="mb"><div class="subj">${esc(m.subject || '(no subject)')}</div><div class="from">${esc(m.from_name || m.from_addr || '')}</div>${m.snippet ? `<div class="snip">${esc(m.snippet)}</div>` : ''}</div>${m.category ? `<span class="mcat">${esc(mailCat(m.category))}</span>` : ''}<span class="mtime">${fmtAgo(m.sent_at || m.created_at)}</span></div>`;
 }
 
 // ============================================================================
@@ -1450,6 +1467,9 @@ async function main() {
   state.online = true;
   await Promise.all([loadInitialProfile(), loadInitialSettings()]);
   startGlobalPoller();
+  if (state.devtools) {
+    import('./lib/devdrive.js').then((m) => m.startDevDrive({ base: state.base, token: state.token })).catch(() => {});
+  }
   if (!location.hash) location.hash = '#/';
   router();
 }

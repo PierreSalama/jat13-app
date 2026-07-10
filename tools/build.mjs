@@ -42,6 +42,8 @@ function copyAssets() {
   // the renderer is plain JS — main.js is bundled below (it imports lib/themes.js, so the registry is
   // in the bundle), but we also copy lib/ verbatim so its ESM source ships beside the bundle.
   cpSync(join(APP, 'src/renderer/lib'), join(OUT, 'renderer/lib'), { recursive: true });
+  // tray icon — loaded at runtime by main.ts via join(HERE,'icon.ico'); ships inside the asar in dev + packaged.
+  cpSync(join(APP, 'build/icon.ico'), join(OUT, 'main/icon.ico'));
 }
 
 export async function buildOnce({ watch = false } = {}) {
