@@ -15,7 +15,8 @@
     "scripting",
     "storage",
     "alarms",
-    "webNavigation"
+    "webNavigation",
+    "downloads"
   ],
   "host_permissions": [
     "*://*.linkedin.com/*",

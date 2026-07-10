@@ -19,23 +19,46 @@
 
   var state = { port: 0, token: '', tab: null, connected: false };
   var retryTimer = null;
+  var installerUrl = ''; // the DIRECT .exe asset url, resolved from the latest release
 
   function setConn(ok, text) {
     conn.dot.className = 'conn-dot ' + (ok ? 'ok' : 'bad');
     conn.text.textContent = text;
   }
 
-  // resolve the DIRECT .exe asset of the newest release for the download button
+  // resolve the DIRECT .exe asset of the newest release. Returns a Promise<url|''> and caches it.
   function resolveInstallerUrl() {
-    fetch(RELEASES_API).then(function (r) { return r.ok ? r.json() : null; }).then(function (rel) {
-      if (!rel || !rel.assets) return;
+    return fetch(RELEASES_API).then(function (r) { return r.ok ? r.json() : null; }).then(function (rel) {
+      if (!rel || !rel.assets) return '';
       var exe = rel.assets.find(function (a) { return /\.exe$/i.test(a.name); });
-      if (exe) {
-        var btn = $('btn-download');
-        btn.setAttribute('href', exe.browser_download_url);
-        btn.textContent = 'Download ' + rel.tag_name + ' (.exe)';
+      if (!exe) return '';
+      installerUrl = exe.browser_download_url;
+      var btn = $('btn-download'); if (btn) btn.textContent = 'Download ' + rel.tag_name + ' (.exe)';
+      return installerUrl;
+    }).catch(function () { return ''; });
+  }
+
+  // Download the installer DIRECTLY (no navigation, no repo page) via chrome.downloads. If GitHub is
+  // unreachable we tell the user — we never dump them on the repo.
+  function startDownload() {
+    var hint = $('download-hint');
+    if (hint) hint.textContent = 'Fetching the latest installer…';
+    var have = installerUrl ? Promise.resolve(installerUrl) : resolveInstallerUrl();
+    have.then(function (url) {
+      if (!url) {
+        if (hint) hint.innerHTML = 'Could not reach GitHub — <a href="' + RELEASES_PAGE + '" target="_blank" rel="noopener">open releases</a>.';
+        return;
       }
-    }).catch(function () { /* fallback href (releases page) stays */ });
+      chrome.downloads.download({ url: url, saveAs: false }, function () {
+        if (chrome.runtime.lastError) {
+          // fallback: open the direct .exe url in a tab (still downloads — NOT the repo page)
+          try { chrome.tabs.create({ url: url }); } catch (e) { /* noop */ }
+          if (hint) hint.textContent = 'Starting download…';
+        } else if (hint) {
+          hint.textContent = 'Downloading — check your downloads, then run the installer.';
+        }
+      });
+    });
   }
 
   async function api(path, opts) {
@@ -80,7 +103,7 @@
     setupRow.hidden = false;
     pageCard.hidden = true;
     actionsRow.hidden = true;
-    resolveInstallerUrl();
+    if (!installerUrl) resolveInstallerUrl(); // pre-resolve once (don't re-hit GitHub on every retry)
     if (retryTimer) clearTimeout(retryTimer);
     retryTimer = setTimeout(probe, 1500);
   }
@@ -125,6 +148,7 @@
   });
 
   $('lnk-retry').addEventListener('click', function (e) { e.preventDefault(); probe(); });
+  $('btn-download').addEventListener('click', function (e) { e.preventDefault(); startDownload(); });
 
   probe();
 })();
