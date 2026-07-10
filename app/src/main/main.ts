@@ -18,7 +18,21 @@ import { mountApi } from './server/api.js';
 import { ensurePairingToken } from './server/pairing.js';
 import { makeDal, defaultContext, type Dal, type Sealer } from './db/dal/index.js';
 import { makeDevDrive } from './server/devdrive.js';
+import { mountDataRoutes, type DataDal, type ImporterPort } from './server/routes-data.js';
+import { snapshotV11, planImport, executeImport } from './importer/v11.js';
+import { migrateGmailCredentials } from './importer/gmail-creds.js';
 import { IDENTITY, PORTS } from '@jat13/shared';
+
+/** v11 sealed values are `enc:v1:` + base64(DPAPI); same OS user → v13 safeStorage decrypts them. */
+function unsealV11(stored: string): string {
+  const PREFIX = 'enc:v1:';
+  if (!stored.startsWith(PREFIX) || !safeStorage.isEncryptionAvailable()) return stored;
+  try {
+    return safeStorage.decryptString(Buffer.from(stored.slice(PREFIX.length), 'base64'));
+  } catch {
+    return '';
+  }
+}
 
 const HERE = dirname(fileURLToPath(import.meta.url)); // dist/main at runtime
 const DEV = !app.isPackaged || process.env.JAT_DEV === '1';
@@ -72,6 +86,23 @@ async function boot(): Promise<void> {
     ? makeDevDrive({ getWindow: () => mainWindow, log: (m) => console.log(`[devdrive] ${m}`) })
     : undefined;
 
+  // The importer seam: routes never import engine modules directly. plan/execute snapshot the source
+  // themselves (copy-based — v11 can be LIVE at :7744), so `snapshots:true` skips the liveness refusal.
+  const importer: ImporterPort = {
+    snapshots: true,
+    plan: (sourcePath) => planImport(snapshotV11(sourcePath).path),
+    execute: (sourcePath, opts) => {
+      const snap = snapshotV11(sourcePath).path;
+      const result = executeImport(opened.db, snap) as unknown as Record<string, unknown>;
+      if (opts.migrateGmail) {
+        const gmail = migrateGmailCredentials(opened.db, snap, { dal, unsealV11 }, { consent: true });
+        return { ...result, gmail };
+      }
+      return result;
+    },
+  };
+  const dataDeps = { dal: dal as unknown as DataDal, importer };
+
   const startedAt = Date.now();
   server = await startServer({
     db: opened.db,
@@ -87,9 +118,11 @@ async function boot(): Promise<void> {
         version: app.getVersion(),
         devtools: DEVTOOLS,
         frontWindow: frontOrCreate,
-        // exactOptionalPropertyTypes: never assign a possibly-undefined value to an optional prop —
-        // the key exists only when dev-drive is actually mounted.
-        ...(devDrive ? { extend: (api: Parameters<typeof devDrive.mount>[0]) => devDrive.mount(api) } : {}),
+        // Stage 1: mount the read/import data routes under the token guard; dev-drive too when on.
+        extend: (api) => {
+          mountDataRoutes(api, { ...dataDeps, db: opened.db, startedAt, token, version: app.getVersion(), devtools: DEVTOOLS, frontWindow: frontOrCreate });
+          devDrive?.mount(api);
+        },
       }),
   });
 

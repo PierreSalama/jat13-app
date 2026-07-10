@@ -716,3 +716,56 @@ html[data-theme='light'] .stub-card .stub-mark { opacity: .09; }
   .settings-grid, .prof-grid { grid-template-columns: 1fr; }
   .span-8, .span-7, .span-6, .span-5, .span-4 { grid-column: span 12; }
 }
+
+/* ============================================================================
+   STAGE 1 — data-surface pages (APPENDED — rules above are frozen)
+   ============================================================================ */
+
+/* --- lib/virtual.js: absolute row positioning + generic placeholder -------- */
+.vitem { position: absolute; left: 0; right: 0; overflow: hidden; }
+.vph { display: flex; align-items: center; padding: 0 22px; border-bottom: 1px solid var(--hair-soft); }
+
+/* centered empty/error overlay inside a virtualized frame */
+.list-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; pointer-events: none; }
+
+/* segs that can outgrow narrow windows scroll instead of wrapping */
+.seg.scroll { overflow-x: auto; max-width: 100%; scrollbar-width: none; }
+.seg.scroll::-webkit-scrollbar { display: none; }
+
+/* --- profile: read-only seed-field values keep to one tidy line ------------ */
+.id-fields { border-top: 1px solid var(--hair); }
+.id-fields .kv .v { max-width: 58%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* provenance badge (learned memory, suggestion chips) */
+.prov {
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 5px;
+  border: 1px solid var(--hair); background: rgba(176, 138, 90, .07);
+  font-size: 9px; letter-spacing: .14em; text-transform: uppercase; font-weight: 600;
+  color: var(--bronze-hi); font-family: var(--sans); white-space: nowrap;
+}
+
+/* memory browser: virtualized rows (grid trimmed — no delete column in Stage 1) */
+.mem-vlist { height: calc(100vh - 344px); min-height: 280px; }
+.la-row.mem { grid-template-columns: 1fr 150px 34px; cursor: pointer; }
+.la-row.mem .meta { align-items: center; overflow: hidden; white-space: nowrap; }
+
+/* answer drawer: the full stored value + option chips */
+.ans-value {
+  margin-top: 6px; padding: 14px 16px; border: 1px solid var(--hair); border-radius: 10px;
+  background: var(--inset); font-family: var(--mono); font-size: 12px; line-height: 1.6;
+  color: var(--ink); white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow-y: auto;
+}
+.ans-opts { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ans-opts .drawer-sec { width: 100%; }
+.dim-note { color: var(--ink-faint); font-style: italic; font-family: var(--serif); }
+
+/* documents: two-step delete confirm state */
+.btn.confirming { border-color: rgba(201, 112, 112, .55); color: var(--danger); font-weight: 600; }
+
+/* activity: ledger toolbar inside the list frame */
+.act-toolbar { display: flex; align-items: center; gap: 12px; padding: 14px 22px 12px; border-bottom: 1px solid var(--hair); }
+.act-toolbar .spacer { flex: 1; }
+
+/* application drawer: details block sits tighter than page-level kv rows */
+.dr-meta { border: 1px solid var(--hair-soft); border-radius: 10px; padding: 2px 0; }
+.dr-meta .kv { padding: 8px 14px; }

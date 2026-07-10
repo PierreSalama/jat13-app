@@ -66,20 +66,68 @@ export const MAIL_CAT_LABEL = {
 export const mailCatLabel = (c) => (c ? (MAIL_CAT_LABEL[c] || humanize(c)) : '');
 
 // ---------------------------------------------------------------------------
-// event kinds (activity ledger)
+// event kinds (activity ledger) — mirrors the events.kind CHECK in 001_init.sql
 // ---------------------------------------------------------------------------
 export const EVENT_KIND_LABEL = {
   created: 'Found', imported: 'Imported', submitted: 'Applied', status_change: 'Status',
-  park: 'Parked', email_matched: 'Email', note: 'Note', document_attached: 'Document',
-  resume_tailored: 'Tailored', autopsy: 'Autopsy', interview_detected: 'Interview',
+  park: 'Parked', needs_human: 'Needs you', email: 'Email', email_matched: 'Email',
+  note: 'Note', document_attached: 'Document', resume_tailored: 'Tailored',
+  cover_letter_generated: 'Cover letter', autopsy_created: 'Autopsy',
+  interview_detected: 'Interview', answer_learned: 'Learned',
 };
 export const EVENT_KIND_DOT = {
   created: 'dim', imported: 'dim', submitted: 'bronze', status_change: 'gold',
-  park: 'ember', email_matched: 'sage', note: 'dim', document_attached: 'bronze',
-  resume_tailored: 'bronze', autopsy: 'ember', interview_detected: 'gold',
+  park: 'ember', needs_human: 'ember', email: 'sage', email_matched: 'sage',
+  note: 'dim', document_attached: 'bronze', resume_tailored: 'bronze',
+  cover_letter_generated: 'bronze', autopsy_created: 'ember',
+  interview_detected: 'gold', answer_learned: 'sage',
 };
 export const eventKindLabel = (k) => EVENT_KIND_LABEL[k] || humanize(k);
 export const eventKindDot = (k) => EVENT_KIND_DOT[k] || 'dim';
+
+// ---------------------------------------------------------------------------
+// application via (how the application happened)
+// ---------------------------------------------------------------------------
+export const VIA_LABEL = { auto: 'Auto', manual: 'Manual', import: 'Imported' };
+export const viaLabel = (v) => (v ? (VIA_LABEL[v] || humanize(v)) : '—');
+
+// ---------------------------------------------------------------------------
+// documents — roles + provenance of the file itself
+// ---------------------------------------------------------------------------
+export const DOC_ROLE_LABEL = {
+  resume: 'Résumé', cover_letter: 'Cover letter', portfolio: 'Portfolio',
+  transcript: 'Transcript', brief: 'Interview brief', other: 'Other',
+};
+export const docRoleLabel = (r) => DOC_ROLE_LABEL[r] || humanize(r);
+/** roles a user may pick when uploading (generated/brief docs are engine-made). */
+export const UPLOAD_DOC_ROLES = ['resume', 'cover_letter', 'portfolio', 'transcript', 'other'];
+export const DOC_SOURCE_LABEL = {
+  upload: 'Uploaded', application: 'From an application', folder: 'Watched folder',
+  generated: 'AI-generated', import_v11: 'From v11',
+};
+export const docSourceLabel = (s) => DOC_SOURCE_LABEL[s] || humanize(s);
+
+// ---------------------------------------------------------------------------
+// learned memory — answer kinds + provenance (who taught the engine this)
+// ---------------------------------------------------------------------------
+export const ANSWER_KIND_LABEL = { field: 'Form field', qa: 'Q&A' };
+export const answerKindLabel = (k) => ANSWER_KIND_LABEL[k] || humanize(k);
+export const PROVENANCE_LABEL = {
+  user: 'You', harvest: 'Harvested', ai: 'AI', teach: 'Taught',
+  profile_push: 'Profile', deterministic: 'Derived', import_v11: 'v11 import',
+};
+export const provenanceLabel = (p) => PROVENANCE_LABEL[p] || humanize(p);
+export const PROVENANCE_DOT = {
+  user: 'gold', harvest: 'bronze', ai: 'ember', teach: 'gold',
+  profile_push: 'sage', deterministic: 'sage', import_v11: 'dim',
+};
+export const provenanceDot = (p) => PROVENANCE_DOT[p] || 'dim';
+
+// ---------------------------------------------------------------------------
+// email→application match provenance (suggest→confirm pipeline)
+// ---------------------------------------------------------------------------
+export const MATCH_SOURCE_LABEL = { auto: 'Matched', suggested: 'Suggested', manual: 'Manual', dismissed: 'Dismissed' };
+export const matchSourceLabel = (s) => MATCH_SOURCE_LABEL[s] || humanize(s);
 
 // ---------------------------------------------------------------------------
 // AI layer vocabulary (Stage 4 — named now so Settings/Autopsies stubs and the
@@ -98,7 +146,7 @@ export const AI_HEALTH_LABEL = {
 // rebuild stages — the delivery ladder (02-STAGES.md, one line each). Drives the
 // Command Center progress card and every stub-card "Arrives · Stage N" badge.
 // ---------------------------------------------------------------------------
-export const CURRENT_STAGE = 0;
+export const CURRENT_STAGE = 1;
 export const STAGES = [
   { n: 0, title: 'Clean slate, skeleton, harness', goal: 'Fresh monorepo, schema v1, API envelope + CI gates, tray-resident boot, dev-drive, this Atelier shell.' },
   { n: 1, title: 'Data foundation', goal: 'Your v11 life imported with full fidelity — every Track and You page browsable on real data.' },
