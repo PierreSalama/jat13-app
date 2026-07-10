@@ -1,0 +1,18 @@
+{
+  "// note": "Type-check ONLY — esbuild is the sole emitter (tools/build.mjs); tsc never runs in the runtime path. NodeNext resolution: every relative TS import carries a .js suffix (tsc maps .js->.ts; esbuild/vitest do the same), and @jat13/shared resolves straight to .ts source via workspace exports — no build step for the contracts package.",
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "resolveJsonModule": true
+  }
+}

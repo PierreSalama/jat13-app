@@ -2,7 +2,7 @@ name: release
 
 # Tag v13.* on this repo → build the Windows installer + electron-updater feed, attach to the GitHub
 # Release. The app then self-updates from here (public repo → tokenless auto-update). v11 (Job-ext-app)
-# is never touched.
+# is never touched; tagging Job-Board builds nothing.
 on:
   push:
     tags:
@@ -18,7 +18,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
 
       - run: npm ci

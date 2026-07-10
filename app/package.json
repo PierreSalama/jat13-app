@@ -1,0 +1,30 @@
+{
+  "name": "jat13-app",
+  "version": "13.1.0",
+  "private": true,
+  "type": "module",
+  "description": "JAT 13 desktop app — the brain. Electron main (single DB writer, Hono loopback server on 7860/7861, tray-resident) + preload + Atelier Noir renderer. Stage 0: skeleton + dev-drive harness.",
+  "main": "dist/main/main.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@jat13/shared": "*",
+    "better-sqlite3": "^12.11.1",
+    "hono": "^4.12.27",
+    "@hono/node-server": "^1.19.0",
+    "ws": "^8.18.0",
+    "electron-updater": "^6.8.9",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "electron": "42.5.2",
+    "electron-builder": "^26.15.3",
+    "@electron/rebuild": "^4.0.0",
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/ws": "^8.5.0"
+  },
+  "comment:stage0": "Stage-0 dep set. Deliberately dropped until their stage lands (scar: dormant half-mechanisms — v13-postmortem §2#10): croner (Stage 3 scheduler/discovery ticks), @googleapis/gmail + google-auth-library + imapflow + mailparser (Stage 5 Gmail), mammoth + unpdf (document text extraction, returns with the docs pipeline). electron-updater stays now because the release chain (version-less JAT-13-Setup.exe + latest.yml on PierreSalama/jat13-app) is part of the locked identity; runtime wiring arrives Stage 6.",
+  "comment:ai": "AI layer (Stage 4) = local CLI subscriptions (Claude Code + Codex) via child_process. NO Anthropic/OpenAI SDK dependency, ever — subscriptions cannot back third-party apps server-side.",
+  "comment:build": "No scripts here by design: the monorepo root owns typecheck (tsc) and emit (esbuild) for main/preload/renderer; electron-builder consumes dist/. Root devDeps provide @types/node, esbuild, vitest."
+}

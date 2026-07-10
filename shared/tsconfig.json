@@ -1,0 +1,9 @@
+{
+  "// note": "Type-check only (esbuild emits). types:[] is deliberate — shared is imported by the extension content script AND the Electron main AND browser renderer, so it must stay platform-neutral: no node globals, no DOM, no chrome.*. If shared compiles with zero ambient types, it runs everywhere.",
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": []
+  },
+  "include": ["src"]
+}

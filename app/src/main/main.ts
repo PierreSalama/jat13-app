@@ -1,0 +1,203 @@
+// Electron main = the brain's entrypoint. Boots the single writer (better-sqlite3), migrates, opens
+// the loopback server (REST API, /drive ws arrives Stage 2), keeps itself tray-resident, opens the
+// Atelier window. One process owns the DB, the port, and the socket; a second instance must never
+// race it — hence the single-instance lock.
+//
+// Stage-0 scope (rebuild plan 02-STAGES §0): skeleton + harness ONLY. No engine, no gmail, no AI,
+// no importer — those subsystems don't exist yet and nothing here may reference them. The lifecycle
+// below is the PROVEN 13.0.1 shape (tray + quitting flag + frontOrCreate + SMOKE), which fixed the
+// live-run failures: closing the window killed the brain → extension unpaired + popup "finish setup"
+// + dead browser dashboard (v13-postmortem failure #2).
+import { app, BrowserWindow, ipcMain, safeStorage, shell, Tray, Menu, nativeImage } from 'electron';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { Database } from 'better-sqlite3';
+import { openDatabase } from './db/index.js';
+import { startServer, type RunningServer } from './server/index.js';
+import { mountApi } from './server/api.js';
+import { ensurePairingToken } from './server/pairing.js';
+import { makeDal, defaultContext, type Dal, type Sealer } from './db/dal/index.js';
+import { makeDevDrive } from './server/devdrive.js';
+import { IDENTITY, PORTS } from '@jat13/shared';
+
+const HERE = dirname(fileURLToPath(import.meta.url)); // dist/main at runtime
+const DEV = !app.isPackaged || process.env.JAT_DEV === '1';
+// SMOKE = headless boot proof: migrate, serve, self-check /health, exit 0/1. CI's cheapest "boot must
+// be flawless" gate — keep it forever (it caught nothing in v13 only because it was never wired to CI).
+const SMOKE = process.env.JAT_SMOKE === '1';
+// dev-drive: the in-app remote-control test channel (navigate/click/fill/inspect/screenshot over
+// loopback — the never-debug-blindly harness). On for dev builds, or opt-in via env for a packaged
+// build. Loopback + token still guard it; it never touches the apply/data path.
+const DEVTOOLS = DEV || process.env.JAT_DEVTOOLS === '1';
+
+let server: RunningServer | undefined;
+let db: Database | undefined;
+let mainWindow: BrowserWindow | undefined;
+let tray: Tray | undefined;
+let quitting = false; // true only when the user chose Quit — lets window-all-closed keep the brain alive otherwise
+
+if (!SMOKE && !app.requestSingleInstanceLock()) app.exit(0);
+
+/** Packaged builds resolve shipped assets (db/migrations) beside the exe; dev resolves from dist/main. */
+const resourceDir = (rel: string): string =>
+  app.isPackaged ? join(process.resourcesPath, rel) : join(HERE, rel);
+
+/** Electron safeStorage (DPAPI on Windows) sealer for the secrets DAL (pairing token at rest);
+ *  degrades to plaintext with a loud warning rather than refusing to boot. */
+const sealer: Sealer = {
+  available: () => {
+    try {
+      return safeStorage.isEncryptionAvailable();
+    } catch {
+      return false;
+    }
+  },
+  seal: (p) => (safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(p) : Buffer.from(p, 'utf8')),
+  open: (b) => (safeStorage.isEncryptionAvailable() ? safeStorage.decryptString(Buffer.from(b)) : Buffer.from(b).toString('utf8')),
+};
+
+async function boot(): Promise<void> {
+  // Dev identity is a SEPARATE userData dir + port so `npm run dev` never touches a prod install's
+  // data. JAT_USERDATA is the explicit override for tests/verify runs (throwaway DBs).
+  if (DEV) app.setPath('userData', join(app.getPath('appData'), IDENTITY.userDataDev));
+  if (process.env.JAT_USERDATA) app.setPath('userData', process.env.JAT_USERDATA);
+
+  const dbFile = join(app.getPath('userData'), 'jat13.db');
+  const opened = openDatabase({ file: dbFile, migrationsDir: resourceDir('db/migrations') });
+  db = opened.db;
+
+  const dal: Dal = makeDal(defaultContext(db), { sealer });
+  const token = ensurePairingToken(dal);
+  const devDrive = DEVTOOLS
+    ? makeDevDrive({ getWindow: () => mainWindow, log: (m) => console.log(`[devdrive] ${m}`) })
+    : undefined;
+
+  const startedAt = Date.now();
+  server = await startServer({
+    db: opened.db,
+    version: app.getVersion(),
+    startedAt,
+    dev: DEV,
+    rendererDir: join(HERE, '..', 'renderer'),
+    mount: (a) =>
+      mountApi(a, {
+        db: opened.db, // Stage-0 ApiDeps takes the raw handle (DAL projections swap in at Stage 1)
+        startedAt,
+        token,
+        version: app.getVersion(),
+        devtools: DEVTOOLS,
+        frontWindow: frontOrCreate,
+        // exactOptionalPropertyTypes: never assign a possibly-undefined value to an optional prop —
+        // the key exists only when dev-drive is actually mounted.
+        ...(devDrive ? { extend: (api: Parameters<typeof devDrive.mount>[0]) => devDrive.mount(api) } : {}),
+      }),
+  });
+
+  // Tray = the reason the brain survives a closed window (extension stays paired, browser dashboard
+  // stays reachable). Skipped in SMOKE: a headless CI boot has no shell tray to attach to.
+  if (!SMOKE) createTray();
+
+  console.log(`[jat13] db schema v${opened.migration.to} @ ${dbFile}`);
+  console.log(`[jat13] brain on http://127.0.0.1:${server.port}${DEV ? ' (dev)' : ''}`);
+  if (!sealer.available()) console.warn('[jat13] safeStorage unavailable — secrets are NOT encrypted at rest on this machine');
+
+  ipcMain.handle('app:ping', () => ({ ok: true, version: app.getVersion() }));
+  // the renderer fetches the loopback API with this token (loopback-only, local-trusted)
+  ipcMain.handle('app:config', () => ({ port: server?.port ?? 0, token, version: app.getVersion(), dev: DEV, devtools: DEVTOOLS }));
+
+  if (SMOKE) {
+    // NOTE: /health is the ONE bare (non-enveloped) route — the liveness probe shape from the old
+    // code ({ok, name, version, protocol, schema, dev, uptimeMs, pid}); everything else uses the
+    // {ok, data}/{ok:false, error} envelope.
+    const res = await fetch(`http://127.0.0.1:${server.port}/health`);
+    const body = (await res.json()) as { ok?: boolean; schema?: number };
+    console.log('[jat13] smoke /health ->', JSON.stringify(body));
+    await shutdown();
+    app.exit(res.ok && body.ok === true && body.schema === opened.migration.to ? 0 : 1);
+    return;
+  }
+
+  createWindow();
+}
+
+/** Raise the existing window (restoring/showing it), or recreate it if it was closed. Used by the
+ *  popup "Open dashboard" (via mountApi's frontWindow) and the tray — works even after the window
+ *  was closed because the tray keeps the process alive. */
+function frontOrCreate(): void {
+  const [win] = BrowserWindow.getAllWindows();
+  if (win) {
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  } else {
+    createWindow();
+  }
+}
+
+/** The system tray — its presence lets `window-all-closed` keep the loopback brain (server + static
+ *  dashboard + future /drive gateway) running. Quit lives HERE, nowhere else. */
+function createTray(): void {
+  if (tray) return;
+  // esbuild copies build/icon.ico → dist/main/icon.ico (root build script wiring).
+  let img = nativeImage.createFromPath(join(HERE, 'icon.ico'));
+  if (!img.isEmpty()) img = img.resize({ width: 16, height: 16 });
+  tray = new Tray(img);
+  tray.setToolTip('JAT 13 — running in the background');
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: 'Open dashboard', click: () => frontOrCreate() },
+      { label: 'Open in browser', click: () => void shell.openExternal(`http://127.0.0.1:${server?.port ?? PORTS.app}/`) },
+      { type: 'separator' },
+      { label: 'Quit JAT 13', click: () => { quitting = true; app.quit(); } },
+    ]),
+  );
+  tray.on('click', () => frontOrCreate()); // left-click the tray = show the dashboard
+}
+
+function createWindow(): void {
+  const win = new BrowserWindow({
+    width: 1320,
+    height: 860,
+    backgroundColor: '#12100d', // Atelier Noir warm black — pre-paint flash matches the theme
+    webPreferences: {
+      preload: join(HERE, 'preload.cjs'),
+      contextIsolation: true,
+      sandbox: true,
+      nodeIntegration: false,
+    },
+  });
+  mainWindow = win;
+  win.on('closed', () => { if (mainWindow === win) mainWindow = undefined; });
+  void win.loadFile(join(HERE, '..', 'renderer', 'index.html'));
+}
+
+async function shutdown(): Promise<void> {
+  await server?.close().catch(() => {});
+  server = undefined;
+  db?.close();
+  db = undefined;
+}
+
+app.on('second-instance', () => {
+  const [win] = BrowserWindow.getAllWindows();
+  if (win) {
+    if (win.isMinimized()) win.restore();
+    win.focus();
+  }
+});
+app.on('window-all-closed', () => {
+  // Do NOT quit on window close — the tray keeps the brain (loopback server + dashboard) alive so
+  // the extension stays connected and the browsable dashboard stays reachable (the 13.0.0 "popup
+  // says finish setup" scar). Quit only via the tray's "Quit" (which sets `quitting`). If the tray
+  // failed to create, fall back to old quit-on-close so the process can't become unreachable.
+  if (quitting || !tray) app.quit();
+});
+app.on('before-quit', () => {
+  quitting = true;
+  void shutdown();
+});
+
+app.whenReady().then(boot).catch((err: unknown) => {
+  console.error('[jat13] boot failed', err);
+  app.exit(1);
+});

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="head">
+    <div class="brand">
+      <span class="brand-mark">JAT</span>
+      <span class="brand-version">v13</span>
+    </div>
+    <div class="conn" id="conn">
+      <span class="conn-dot" id="conn-dot"></span>
+      <span id="conn-text">checking…</span>
+    </div>
+  </header>
+
+  <!-- First-run: app not found → direct installer download -->
+  <section class="setup" id="setup-row" hidden>
+    <div class="setup-title">Finish setup</div>
+    <div class="setup-sub">Install the desktop app to start tracking and auto-applying — it takes about a minute.</div>
+    <button class="btn primary" id="btn-download">Download the app (.exe)</button>
+    <div class="hint" id="download-hint"></div>
+    <div class="hint"><a id="lnk-releases" href="https://github.com/PierreSalama/jat13-app/releases/latest" target="_blank" rel="noopener">All versions</a> · already installed? Launch it, then <a href="#" id="lnk-retry">retry</a>.</div>
+  </section>
+
+  <!-- Paired: quick actions -->
+  <section class="card" id="page-card" hidden>
+    <div class="card-eyebrow">This page</div>
+    <div class="page-line muted" id="page-status">—</div>
+    <button class="btn primary" id="btn-capture">📌 Track this page</button>
+    <div class="hint" id="capture-hint"></div>
+  </section>
+
+  <section class="actions" id="actions-row" hidden>
+    <button class="btn" id="btn-open">Open dashboard</button>
+  </section>
+
+  <footer class="foot" id="foot">The desktop app is the brain — this extension is its hands &amp; eyes.</footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

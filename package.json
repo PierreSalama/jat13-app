@@ -1,0 +1,34 @@
+{
+  "name": "jat13",
+  "version": "13.1.0",
+  "private": true,
+  "description": "JAT 13 — job auto-apply: desktop brain (Electron) + thin Chrome extension, adapters-as-data. Ground-up v13 rebuild (Stage 0: skeleton + harness).",
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "app",
+    "extension"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "node tools/dev.mjs",
+    "build": "node tools/build.mjs",
+    "build:ext": "node extension/build.mjs",
+    "typecheck": "tsc -p shared/tsconfig.json && tsc -p app/tsconfig.json && tsc -p extension/tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dist": "npm run build && cd app && npx electron-builder --config electron-builder.yml",
+    "dist:publish": "npm run build && cd app && npx electron-builder --config electron-builder.yml --publish always",
+    "rebuild:electron": "cd app && npx electron-rebuild -f -w better-sqlite3",
+    "rebuild:node": "npm rebuild better-sqlite3"
+  },
+  "comment:abi": "better-sqlite3 is native: vitest needs the NODE abi (rebuild:node), Electron needs the ELECTRON abi (rebuild:electron — tools/dev.mjs runs it for you). After `npm run dev`, run `npm run rebuild:node` before `npm test`.",
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.28.1",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.10"
+  }
+}

@@ -14,12 +14,15 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
 
       # native better-sqlite3 builds under the NODE abi here; vitest runs on node, so this is the
       # abi the tests need (the Electron abi is only rebuilt at package time, never in CI checks).
       - run: npm ci
+
+      - name: rebuild better-sqlite3 (node abi)
+        run: npm run rebuild:node
 
       - name: typecheck (tsc, no emit)
         run: npm run typecheck
@@ -27,12 +30,31 @@ jobs:
       - name: test (vitest — unit + integration)
         run: npm test
 
-      - name: build (esbuild bundle main + preload)
+      - name: build (esbuild bundle main + preload + renderer)
         run: npm run build
 
-  # gate skeleton — validators are added as their milestones land (version drift M0.5, extension M1,
-  # adapters M6). Kept as a named, non-failing placeholder so the pipeline shape exists from day one.
-  gates:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "gates placeholder — validate-versions/extension/adapters wire in per-milestone"
+      # Postmortem rule 8: renderer modularity is a CI GATE, not an aspiration. v13.0.x grew a
+      # 1,476-line renderer/main.js that was unreviewable; any app/src/renderer file over 400
+      # lines now fails the build. One file per page or it does not merge.
+      - name: renderer gate — no renderer file over 400 lines
+        run: |
+          node -e '
+            const { readdirSync, readFileSync, statSync } = require("node:fs");
+            const { join } = require("node:path");
+            const MAX = 400;
+            const bad = [];
+            (function walk(dir) {
+              for (const name of readdirSync(dir)) {
+                const p = join(dir, name);
+                if (statSync(p).isDirectory()) { walk(p); continue; }
+                const lines = readFileSync(p, "utf8").split("\n").length;
+                if (lines > MAX) bad.push(p + ": " + lines + " lines");
+              }
+            })("app/src/renderer");
+            if (bad.length) {
+              console.error("renderer files over " + MAX + " lines (split into one module per page):");
+              for (const b of bad) console.error("  " + b);
+              process.exit(1);
+            }
+            console.log("renderer gate ok — no file over " + MAX + " lines");
+          '

@@ -1,0 +1,17 @@
+{
+  "name": "@jat13/shared",
+  "version": "13.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Contract package imported by app AND extension AND tests: locked identity constants + the ONE API envelope. The single source of truth that makes contract-drift a compile error.",
+  "main": "src/index.ts",
+  "comment:exports": "Points at .ts source (internal-package pattern): app/extension/tests resolve types with no build step; esbuild bundles the source in.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./identity": "./src/identity.ts",
+    "./envelope": "./src/envelope.ts"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}
