@@ -47,6 +47,10 @@ const shared = {
 // that "builds" without its migrations or shell is exactly the half-pipeline class we're killing.
 function copyAssets() {
   cpSync(join(APP, 'src/main/db/migrations'), join(OUT, 'main/db/migrations'), { recursive: true });
+  // Adapter builtins (Stage 2): the generic driver loads these JSON recipes at runtime via
+  // resourceDir('adapters/builtin') (main.ts), mirroring the migrations resolution. Ship them beside
+  // the bundle so `npm run dev` resolves them; electron-builder's extraResources ships them packaged.
+  cpSync(join(APP, 'src/main/adapters/builtin'), join(OUT, 'main/adapters/builtin'), { recursive: true });
   mkdirSync(join(OUT, 'renderer'), { recursive: true });
   cpSync(join(APP, 'src/renderer/index.html'), join(OUT, 'renderer/index.html'));
   cpSync(join(APP, 'src/renderer/styles.css'), join(OUT, 'renderer/styles.css'));

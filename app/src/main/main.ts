@@ -19,8 +19,15 @@ import { ensurePairingToken } from './server/pairing.js';
 import { makeDal, defaultContext, type Dal, type Sealer } from './db/dal/index.js';
 import { makeDevDrive } from './server/devdrive.js';
 import { mountDataRoutes, type DataDal, type ImporterPort } from './server/routes-data.js';
+import { mountApplyRoutes } from './server/routes-apply.js';
+import { mountLearnApi } from './learn/index.js';
+import { makeLearnDistiller } from './learn/distiller.js';
+import { loadBuiltins, makeRegistry, type Registry } from './adapters/registry.js';
+import { WsGateway } from './engine/ws-gateway.js';
+import { makeRunService, type ApplyRunService } from './engine/run-service.js';
 import { snapshotV11, planImport, executeImport } from './importer/v11.js';
 import { migrateGmailCredentials } from './importer/gmail-creds.js';
+import type { Server as HttpServer } from 'node:http';
 import { IDENTITY, PORTS } from '@jat13/shared';
 
 /** v11 sealed values are `enc:v1:` + base64(DPAPI); same OS user → v13 safeStorage decrypts them. */
@@ -86,6 +93,14 @@ async function boot(): Promise<void> {
     ? makeDevDrive({ getWindow: () => mainWindow, log: (m) => console.log(`[devdrive] ${m}`) })
     : undefined;
 
+  // Stage 2 apply spine: the adapter registry, the /drive gateway (attached to the loopback server
+  // below), and the single-apply run-service. The run-service depends only on the RunGateway interface,
+  // so the survival test proves the whole drive headlessly with a FakeExtension.
+  const registry: Registry = makeRegistry(loadBuiltins(resourceDir('adapters/builtin')));
+  const gateway = new WsGateway({ token, log: (m) => console.log(`[gateway] ${m}`) });
+  const runService: ApplyRunService = makeRunService({ dal, gateway, registry, log: (m) => console.log(`[run] ${m}`) });
+  const learnDistiller = makeLearnDistiller({ dal });
+
   // The importer seam: routes never import engine modules directly. plan/execute snapshot the source
   // themselves (copy-based — v11 can be LIVE at :7744), so `snapshots:true` skips the liveness refusal.
   const importer: ImporterPort = {
@@ -118,13 +133,18 @@ async function boot(): Promise<void> {
         version: app.getVersion(),
         devtools: DEVTOOLS,
         frontWindow: frontOrCreate,
-        // Stage 1: mount the read/import data routes under the token guard; dev-drive too when on.
+        // Stages 1-2: read/import data routes + the apply spine + watch-and-learn, all under the token guard.
         extend: (api) => {
           mountDataRoutes(api, { ...dataDeps, db: opened.db, startedAt, token, version: app.getVersion(), devtools: DEVTOOLS, frontWindow: frontOrCreate });
+          mountApplyRoutes(api, { dal, runService });
+          mountLearnApi(api, dal, learnDistiller);
           devDrive?.mount(api);
         },
       }),
   });
+
+  // the /drive WebSocket rides the SAME loopback server (token-guarded upgrade on IDENTITY.wsPath).
+  gateway.attach(server.server as unknown as HttpServer);
 
   // Tray = the reason the brain survives a closed window (extension stays paired, browser dashboard
   // stays reachable). Skipped in SMOKE: a headless CI boot has no shell tray to attach to.

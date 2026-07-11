@@ -768,4 +768,104 @@ html[data-theme='light'] .stub-card .stub-mark { opacity: .09; }
 
 /* application drawer: details block sits tighter than page-level kv rows */
 .dr-meta { border: 1px solid var(--hair-soft); border-radius: 10px; padding: 2px 0; }
+.dr-actions { margin-top: 12px; display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* ===========================================================================
+   STAGE 2 — Auto-Apply run theater, Needs-You answer forms, Autopsy cards.
+   Theme-aware by construction: every colour is a CSS variable keyed on
+   html[data-theme], so Noir/Ivory both read correctly. Appended only.
+   =========================================================================== */
+.dim { color: var(--ink-dim); font-weight: 400; }
+
+/* --- Auto-Apply: control bar + Stage-3 placeholder ------------------------ */
+.aa-control { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 16px 20px; }
+.aa-note { font-family: var(--mono); font-size: 10px; color: var(--ink-faint); letter-spacing: .04em; }
+.aa-placeholder { padding: 18px 20px 22px; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 14px; color: var(--ink-faint); }
+.aa-ph-mark { color: var(--hair); opacity: .5; }
+.aa-placeholder p { font-size: 12px; line-height: 1.6; color: var(--ink-dim); max-width: 280px; }
+.aa-placeholder p b { color: var(--ink); }
+
+/* --- Auto-Apply: the live run theater ------------------------------------- */
+.aa-run { padding: 4px 20px 18px; }
+.aa-run-h { display: flex; align-items: baseline; gap: 12px; padding: 12px 0 8px; }
+.aa-run-title { flex: 1; min-width: 0; font-size: 16px; font-weight: 500; color: var(--ink); letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.aa-state { flex: none; display: inline-flex; align-items: center; gap: 7px; font-size: 10px; letter-spacing: .18em; text-transform: uppercase; font-weight: 700; color: var(--ink-dim); }
+.aa-run-sub { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--ink-faint); }
+.aa-run-sub span { color: var(--ink-dim); }
+.aa-bar { margin: 12px 0 14px; height: 4px; border-radius: 3px; background: rgba(236, 228, 212, .08); overflow: hidden; }
+.aa-bar i { display: block; height: 100%; background: var(--gold-grad); border-radius: 3px; box-shadow: 0 0 8px rgba(201, 163, 115, .45); transition: width .6s ease; }
+
+.aa-see { border: 1px solid var(--hair); border-radius: 11px; background: var(--inset); padding: 4px 14px; }
+.aa-see-row { display: flex; align-items: baseline; gap: 14px; padding: 9px 0; border-top: 1px solid var(--hair-soft); font-size: 12.5px; }
+.aa-see-row:first-child { border-top: none; }
+.aa-see-row .k { flex: none; width: 58px; font-size: 9.5px; letter-spacing: .22em; text-transform: uppercase; color: var(--ink-faint); }
+.aa-see-row .v { flex: 1; min-width: 0; color: var(--ink); overflow: hidden; text-overflow: ellipsis; }
+.aa-see-row .v.ember { color: var(--ember); }
+
+.aa-needs-cta { margin-top: 12px; display: flex; align-items: center; gap: 8px; padding: 11px 14px; border: 1px solid rgba(207, 138, 82, .28); border-radius: 10px; background: rgba(207, 138, 82, .08); color: var(--ember); font-size: 12px; }
+.aa-needs-cta a { color: var(--ember); text-decoration: underline; }
+
+.aa-trail-h { margin: 18px 0 6px; font-size: 10px; letter-spacing: .26em; text-transform: uppercase; color: var(--bronze); font-weight: 600; }
+.aa-trail { border: 1px solid var(--hair-soft); border-radius: 10px; max-height: 300px; overflow-y: auto; }
+.aa-trail-more { padding: 8px 14px; font-family: var(--mono); font-size: 10px; color: var(--ink-faint); text-align: center; border-bottom: 1px solid var(--hair-soft); }
+.aa-step { display: grid; grid-template-columns: 52px 128px 1fr auto; gap: 12px; align-items: baseline; padding: 8px 14px; font-size: 12px; }
+.aa-step + .aa-step { border-top: 1px solid var(--hair-soft); }
+.aa-step.bad { background: rgba(201, 112, 112, .06); }
+.aa-step .t { font-family: var(--mono); font-size: 10px; color: var(--ink-faint); }
+.aa-step .ph { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-dim); white-space: nowrap; }
+.aa-step .d { min-width: 0; color: var(--ink-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.aa-step .ms { font-family: var(--mono); font-size: 9.5px; color: var(--ink-faint); }
+
+/* --- Auto-Apply: the job picker overlay ----------------------------------- */
+.picker.aa-picker { margin-top: 10vh; width: min(560px, 94vw); }
+.aa-pick-list { max-height: 52vh; overflow-y: auto; padding: 6px; }
+.aa-pick { display: flex; align-items: center; gap: 12px; padding: 11px 14px; border-radius: 9px; cursor: pointer; }
+.aa-pick:hover { background: var(--hover-2, rgba(201, 163, 115, .08)); }
+.aa-pick .who { flex: 1; min-width: 0; }
+.aa-pick .who .t { font-size: 13px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.aa-pick .go { flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; font-weight: 700; color: var(--bronze-hi); }
+
+/* --- Needs You: queue items, answer forms, wall hints --------------------- */
+.need-item { border-top: 1px solid var(--hair-soft); padding: 15px 20px; }
+.need-item:first-child { border-top: none; }
+.need-head { display: flex; align-items: center; gap: 14px; }
+.need-head .glyph { width: 36px; height: 36px; flex: none; border-radius: 10px; display: grid; place-items: center; border: 1px solid var(--hair); background: rgba(176, 138, 90, .08); color: var(--bronze-hi); }
+.need-head .glyph.c { background: rgba(207, 138, 82, .1); color: var(--ember); border-color: rgba(207, 138, 82, .28); }
+.need-b { flex: 1; min-width: 0; }
+.need-t { font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.need-t span { color: var(--ink-dim); font-weight: 400; }
+.need-s { font-size: 11.5px; color: var(--ink-faint); margin-top: 3px; }
+.need-head .age { font-family: var(--mono); font-size: 10px; color: var(--ink-faint); flex: none; }
+
+.answer-form .need-q { display: flex; flex-direction: column; gap: 6px; }
+.need-qlabel { margin-bottom: 6px; }
+.need-radios { display: flex; flex-wrap: wrap; gap: 8px; }
+.need-radio { display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px; border: 1px solid var(--hair); border-radius: 9px; background: var(--inset); font-size: 12px; color: var(--ink-dim); cursor: pointer; transition: border-color .15s, color .15s; }
+.need-radio:hover { border-color: rgba(201, 163, 115, .4); color: var(--ink); }
+.need-radio input { accent-color: var(--bronze-hi); }
+.need-radio:has(input:checked) { border-color: rgba(201, 163, 115, .55); color: var(--ink); background: rgba(176, 138, 90, .1); }
+.need-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+.need-hint { margin-top: 12px; padding: 14px; border: 1px solid var(--hair); border-radius: 11px; background: var(--inset); }
+.need-hint.wall { border-color: rgba(207, 138, 82, .24); }
+.need-hint-b { font-size: 12.5px; line-height: 1.6; color: var(--ink-dim); }
+.need-hint-a { margin-top: 12px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.need-hint-note { font-size: 11.5px; color: var(--ink-faint); font-style: italic; font-family: var(--serif); }
+
+/* --- Autopsies: single post-mortem cards ---------------------------------- */
+.autopsy { border: 1px solid var(--hair); border-radius: 12px; background: linear-gradient(180deg, var(--card-hi), var(--card) 60%); padding: 16px 18px; margin: 12px 20px; }
+.autopsy:first-child { margin-top: 4px; }
+.au-h { display: flex; align-items: center; gap: 14px; }
+.au-state { flex: none; display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px; border-radius: 8px; border: 1px solid var(--hair); font-size: 9.5px; letter-spacing: .16em; text-transform: uppercase; font-weight: 700; color: var(--ink-dim); }
+.au-who { flex: 1; min-width: 0; }
+.au-title { font-size: 14px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.au-title span { color: var(--ink-dim); font-weight: 400; }
+.au-meta { font-size: 11px; color: var(--ink-faint); margin-top: 2px; font-family: var(--mono); }
+.au-age { flex: none; font-family: var(--mono); font-size: 10px; color: var(--ink-faint); }
+.au-stopped { margin-top: 12px; display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-dim); }
+.au-stopped b { color: var(--ink); font-weight: 600; }
+.au-summary { margin-top: 10px; font-size: 12.5px; line-height: 1.65; color: var(--ink-dim); }
+.au-trail { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+.au-step { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--hair-soft); background: rgba(176, 138, 90, .05); font-size: 10px; letter-spacing: .06em; color: var(--ink-dim); white-space: nowrap; }
+.au-step.bad { border-color: rgba(201, 112, 112, .4); color: var(--danger); }
 .dr-meta .kv { padding: 8px 14px; }

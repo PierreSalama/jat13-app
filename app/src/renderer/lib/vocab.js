@@ -37,7 +37,17 @@ export const RUN_STATE = {
 };
 export const ACTIVE_RUN_STATES = ['leased', 'navigating', 'classifying', 'driving', 'verifying', 'waiting_page'];
 export const TERMINAL_RUN_STATES = new Set(['submitted', 'ready_for_review', 'parked', 'skipped', 'failed']);
+/** Live = anything the theater should surface: queued + slot-holding + parked-on-a-human. */
+export const LIVE_RUN_STATES = new Set(['queued', ...ACTIVE_RUN_STATES, 'needs_human']);
 export const runStateLabel = (s) => RUN_STATE[s]?.label || humanize(s);
+export const runStatePct = (s) => RUN_STATE[s]?.pct ?? 0;
+// one dot colour per run state (theater history rows + autopsy final-state badges)
+export const RUN_STATE_DOT = {
+  queued: 'dim', leased: 'sage', navigating: 'sage', classifying: 'sage', driving: 'gold', verifying: 'gold',
+  waiting_page: 'ember', needs_human: 'ember', submitted: 'bronze', ready_for_review: 'gold',
+  parked: 'ember', skipped: 'dim', failed: 'danger',
+};
+export const runStateDot = (s) => RUN_STATE_DOT[s] || 'dim';
 
 // park vocabulary (why a run stopped and what kind of human it needs)
 export const PARK_LABEL = {
@@ -46,7 +56,32 @@ export const PARK_LABEL = {
   external_redirect: 'External site', rate_limited: 'Rate limited', other: 'Needs attention',
 };
 export const ANSWERABLE_PARK = new Set(['needs_answer', 'other', 'awaiting_review']);
+/** Walls the human can only clear in the browser (no answer form — "open the tab"). */
+export const WALL_PARK = new Set(['captcha', 'cloudflare', 'login', 'account_wall', 'resume_required', 'external_redirect']);
 export const parkLabel = (k) => PARK_LABEL[k] || humanize(k);
+
+// ---------------------------------------------------------------------------
+// apply-run step transcript (apply_run_steps.phase → human) — the live theater
+// trail AND the autopsy step trail read their labels here, nowhere else.
+// ---------------------------------------------------------------------------
+export const STEP_PHASE_LABEL = {
+  open: 'Opened', navigate: 'Navigated', classify: 'Read the page', detect: 'Found the form',
+  fill: 'Filled a field', answer: 'Answered', upload: 'Attached a file', advance: 'Advanced',
+  verify: 'Verified submit', park: 'Parked', resume: 'Resumed', finish: 'Finished',
+};
+export const stepPhaseLabel = (p) => STEP_PHASE_LABEL[p] || humanize(p);
+export const STEP_PHASE_DOT = {
+  open: 'dim', navigate: 'sage', classify: 'sage', detect: 'sage', fill: 'gold', answer: 'gold',
+  upload: 'gold', advance: 'bronze', verify: 'bronze', park: 'ember', resume: 'ember', finish: 'sage',
+};
+export const stepPhaseDot = (p) => STEP_PHASE_DOT[p] || 'dim';
+
+// ---------------------------------------------------------------------------
+// autopsy self-healing proposal lifecycle (Stage 5 — named now so the Stage-2
+// single cards and the Stage-5 pattern groups speak the same words).
+// ---------------------------------------------------------------------------
+export const PROPOSAL_STATE_LABEL = { none: 'No proposal yet', proposed: 'Fix proposed', applied: 'Fix applied', dismissed: 'Dismissed' };
+export const proposalStateLabel = (s) => PROPOSAL_STATE_LABEL[s] || humanize(s);
 
 // ---------------------------------------------------------------------------
 // lanes + sources

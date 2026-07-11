@@ -17,12 +17,15 @@ files:
   - '!**/*.map'
 
 # Shipped beside the app so main.ts resolves them via process.resourcesPath.
-# Stage 0 ships migrations only. Adapter builtins (src/main/adapters/builtin → adapters/builtin,
-# filter **/*.json) return in Stage 2 with the apply engine — re-add that block then.
+# Migrations + (Stage 2) adapter builtins: the generic driver loads the JSON recipes at runtime via
+# resourceDir('adapters/builtin'), so packaged apps need the JSON beside the exe (not inside the asar).
 extraResources:
   - from: src/main/db/migrations
     to: db/migrations
     filter: ['**/*.sql']
+  - from: src/main/adapters/builtin
+    to: adapters/builtin
+    filter: ['**/*.json']
 
 # jat13:// deep-link scheme (the extension pairing hand-off opens the app).
 protocols:

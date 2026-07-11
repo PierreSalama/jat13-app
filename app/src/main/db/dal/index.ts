@@ -20,6 +20,7 @@ import { makeEmailsDal } from './emails.js';
 import { makeDocumentsDal } from './documents.js';
 import { makeProfilesDal } from './profiles.js';
 import { makeAnswersDal } from './answers.js';
+import { makeAutopsiesDal } from './autopsies.js';
 
 /** Event-sink payload: the CHANGED ROW (or a partial patch), never "refetch everything".
  *  `emit` is a no-op until a consumer (live UI updates — build-or-strike at Stage 0's PatchBus
@@ -181,6 +182,7 @@ export interface Dal {
   documents: ReturnType<typeof makeDocumentsDal>;
   profiles: ReturnType<typeof makeProfilesDal>;
   answers: ReturnType<typeof makeAnswersDal>;
+  autopsies: ReturnType<typeof makeAutopsiesDal>;
   settings: ReturnType<typeof makeSettingsDal>;
   secrets: SecretsDal;
   /** the shared context, so callers can run their own ctx.db.transaction / emit / newId. */
@@ -202,6 +204,7 @@ export function makeDal(ctx: DalContext, deps: { sealer: Sealer }): Dal {
     documents: makeDocumentsDal(ctx),
     profiles: makeProfilesDal(ctx),
     answers: makeAnswersDal(ctx),
+    autopsies: makeAutopsiesDal(ctx),
     settings: makeSettingsDal(ctx),
     secrets: makeSecretsDal(ctx, deps.sealer),
     ctx,
@@ -220,7 +223,13 @@ export type {
   ApplicationStatus, ApplicationVia, ApplicationRow, ApplicationLean, ApplicationDetail,
   ApplicationPatch,
 } from './applications.js';
-export type { Run, RunLean, RunStep, RunState, RunLane, RunMode, RunRoute, ParkKind, EvidenceKind, StepPhase } from './runs.js';
+export type {
+  Run, RunLean, RunStep, RunState, RunLane, RunMode, RunRoute, ParkKind, EvidenceKind, StepPhase,
+  EnqueueInput, RunPatch, TransitionPatch, AddStepInput,
+} from './runs.js';
+export type {
+  Autopsy, AutopsyLean, AutopsyFinalState, ProposalState, RecordAutopsyInput, ListRecentInput,
+} from './autopsies.js';
 export type { EventKind, EventRow, RecordEventInput } from './events.js';
 export { EVENT_KINDS } from './events.js';
 export type {

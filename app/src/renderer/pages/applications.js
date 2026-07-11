@@ -3,7 +3,7 @@
 // pages, status chips, honest client-side search over LOADED rows, and a detail
 // drawer (timeline + matched emails + meta) per row. All labels via vocab.js;
 // all fetches via lib/api.js; virtualization via lib/virtual.js.
-import { el, $, esc, icon, debounce, fmtDate, fmtDateTime, fmtAgo, num, pageHead, openOverlay } from '../lib/dom.js';
+import { el, $, esc, icon, debounce, fmtDate, fmtDateTime, fmtAgo, num, pageHead, openOverlay, toast, errToast } from '../lib/dom.js';
 import { api } from '../lib/api.js';
 import { createVirtualList } from '../lib/virtual.js';
 import { statusLabel, statusDot, viaLabel, srcTagText, mailCatLabel, eventKindLabel, eventKindDot } from '../lib/vocab.js';
@@ -102,7 +102,7 @@ export default function render(view, ctx) {
       <div class="r-via">${esc(viaLabel(row.via))}</div>
       <div class="r-date tnum">${fmtAgo(row.updated_at)}</div>
     </div>`);
-    n.addEventListener('click', () => openDrawer(row));
+    n.addEventListener('click', () => openDrawer(row, ctx));
     if (!j) ensureJob(row.job_id, (job) => {
       const cell = $(`.r-title[data-jrow="${CSS.escape(row.job_id)}"]`, viewport);
       if (cell && job) cell.innerHTML = `<div class="t">${esc(job.title)}</div><div class="c">${esc(job.company || job.location || '')}</div>`;
@@ -156,9 +156,11 @@ export default function render(view, ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// detail drawer — meta + timeline + matched emails for one application
+// detail drawer — meta + timeline + matched emails for one application.
+// Stage 2 adds the "Apply now" action: drive THIS Saved job through one supervised
+// run, then hop to Auto-Apply's live theater to watch it. POST /api/apply/one.
 // ---------------------------------------------------------------------------
-async function openDrawer(row) {
+async function openDrawer(row, ctx) {
   const j = jobKnown(row.job_id);
   const node = el(`<div class="drawer">
     <div class="drawer-h">
@@ -191,7 +193,27 @@ async function openDrawer(row) {
       ${kv('Due', row.due_at ? esc(fmtDate(row.due_at)) : '')}
       ${row.needs_review ? kv('Review', '<span class="needs-flag">Needs review</span>') : ''}
     </div>
-    ${job?.job_url ? `<div style="margin-top:10px"><a class="btn sm" href="${esc(job.job_url)}" target="_blank" rel="noreferrer">${icon('external', 13)} Open posting</a></div>` : ''}`;
+    <div class="dr-actions">
+      ${row.status === 'tracked' ? `<button class="btn sm primary" id="dr-apply">${icon('bolt', 13)} Apply now</button>` : ''}
+      ${job?.job_url ? `<a class="btn sm" href="${esc(job.job_url)}" target="_blank" rel="noreferrer">${icon('external', 13)} Open posting</a>` : ''}
+    </div>`;
+  };
+
+  // wire the Apply-now action (idempotent — re-called after every body rebuild)
+  const wireApply = () => {
+    const btn = $('#dr-apply', node);
+    if (!btn || btn.dataset.wired) return;
+    btn.dataset.wired = '1';
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        const res = await api('/apply/one', { method: 'POST', body: { applicationId: row.id } });
+        const runId = res?.run?.id || res?.runId || res?.id || null;
+        close();
+        toast('Applying — opening the live theater', 'success', 3000);
+        ctx.go(runId ? `/auto-apply?run=${encodeURIComponent(runId)}` : `/auto-apply?apply=${encodeURIComponent(row.id)}`);
+      } catch (e) { btn.disabled = false; errToast(e, 'Apply'); }
+    });
   };
 
   try {
@@ -216,9 +238,10 @@ async function openDrawer(row) {
       </div>`).join('');
     }
     body.innerHTML = html;
+    wireApply();
   } catch (e) {
     if (e?.aborted) return;
     const body = $('#dr-body', node);
-    if (body) body.innerHTML = metaHtml() + `<div class="empty">Could not load the timeline — ${esc(e?.message || 'unknown error')}</div>`;
+    if (body) { body.innerHTML = metaHtml() + `<div class="empty">Could not load the timeline — ${esc(e?.message || 'unknown error')}</div>`; wireApply(); }
   }
 }

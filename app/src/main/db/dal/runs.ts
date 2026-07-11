@@ -1,20 +1,28 @@
-// runs DAL — Stage-1 READ surface over apply_runs + apply_run_steps (imported v11 history + the
-// Applications drawer's run-history panel). Lists are LEAN (no evidence_json / pending_questions_json
-// blobs — payload law); `get` hydrates the JSON columns for the one-row detail read.
+// runs DAL — the apply-run state machine's ONLY persistence writer (Stage 2 turns the Stage-1
+// read-only surface into the full guarded writer). Every `state` write routes through `transition`,
+// which calls `assertTransition` from the engine's run-fsm.ts (the state graph is NOT re-derived here —
+// agent A owns the graph; we import it). The row-level CHECK `state<>'submitted' OR evidence…` is
+// honored by writing state + evidence in ONE UPDATE so no bad intermediate row is ever visible.
+// Slot accounting ("busy = one SQL query") counts ONLY the SLOT_HOLDING states, also from run-fsm.ts.
 //
-// DELIBERATELY ABSENT until Stage 2 (the engine): enqueue / transition / recordSubmitted / patch /
-// addStep / slotCount / reclaimStranded. Those are respec'd VERBATIM from cb25d19 runs.ts + run-fsm.ts
-// (the guarded writer + assertTransition graph proven by the survival test) when the runner lands —
-// Stage 1 writes runs ONLY via the importer, and the schema CHECK (submitted requires trustworthy
-// evidence_kind) is already law at the row level.
+// apply_ledger is written here too (recordSubmitted): ONE row per REAL submit — the per-account cap
+// authority Stage 3 reads. Keeping the INSERT inside the DAL preserves the "no raw SQL outside db/dal/"
+// law; run-service never touches the ledger table directly.
 
-import type { DalContext, LeanPage } from './index.js';
+import type { DalContext, DomainEvent, LeanPage } from './index.js';
 import { makeStmtCache, clampLimit, clampOffset } from './index.js';
+import {
+  assertTransition,
+  isTerminal,
+  isSlotHolding,
+  SLOT_HOLDING,
+} from '../../engine/run-fsm.js';
 
 // ---- vocabularies (bind to the apply_runs CHECKs in migration 001) ---------
 
 /** The 13-state FSM as data. Slot-holding = leased|navigating|classifying|driving|verifying|
- *  waiting_page; terminal = submitted|ready_for_review|parked|skipped|failed. */
+ *  waiting_page; terminal = submitted|ready_for_review|parked|skipped|failed. Kept structurally
+ *  identical to run-fsm.ts's RunState (same string union) so the two never fork. */
 export type RunState =
   | 'queued' | 'leased' | 'navigating' | 'classifying' | 'driving' | 'verifying'
   | 'waiting_page' | 'needs_human' | 'submitted' | 'ready_for_review'
@@ -102,6 +110,59 @@ export interface RunStep {
   ok: boolean;
 }
 
+export interface EnqueueInput {
+  source: string;
+  lane: RunLane;
+  jobId: string;
+  profileId: string;
+  mode?: RunMode;
+  adapterId?: string;
+  adapterVersion?: number;
+}
+
+/** Non-state patchable columns. `state` is intentionally ABSENT — set it via `transition`. */
+export interface RunPatch {
+  page_key?: string | null;
+  step_seq?: number;
+  cmd_seq?: number;
+  tab_epoch?: number | null;
+  park_kind?: ParkKind | null;
+  park_detail?: string | null;
+  error?: string | null;
+  evidence_kind?: EvidenceKind | null;
+  evidence_json?: unknown;
+  pending_questions_json?: unknown;
+  attempt?: number;
+  adapter_id?: string | null;
+  adapter_version?: number | null;
+}
+
+/** Patch fields applied in the SAME UPDATE as a state transition (evidence must land atomically). */
+export interface TransitionPatch {
+  page_key?: string | null;
+  cmd_seq?: number;
+  tab_epoch?: number | null;
+  park_kind?: ParkKind | null;
+  park_detail?: string | null;
+  error?: string | null;
+  evidence_kind?: EvidenceKind | null;
+  evidence_json?: unknown;
+  pending_questions_json?: unknown;
+  attempt?: number;
+  adapter_id?: string | null;
+  adapter_version?: number | null;
+}
+
+export interface AddStepInput {
+  phase: StepPhase;
+  action?: string;
+  target?: string;
+  detail?: string;
+  snapshotHash?: string;
+  durationMs?: number;
+  ok?: boolean;
+}
+
 export interface ListLeanInput {
   state?: RunState;
   source?: string;
@@ -136,6 +197,10 @@ const LEAN_COLS =
 
 const STEP_COLS = 'run_id, seq, at, phase, action, target, detail, snapshot_hash, duration_ms, ok';
 
+// The set of state values that hold a slot, spelled for an IN (…) clause. Derived from SLOT_HOLDING
+// (run-fsm.ts owns the set) — never hand-listed, so the two can't drift.
+const SLOT_PLACEHOLDERS = SLOT_HOLDING.map(() => '?').join(', ');
+
 // ---- raw DB row types (before defensive JSON parse) -------------------------
 
 interface RunRow {
@@ -163,6 +228,25 @@ function parseJson<T>(raw: string | null, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+/**
+ * Serialize a value destined for a json_valid()-checked TEXT column. Callers pass EITHER a structured
+ * value (object/array — stringify it) OR pre-serialized JSON text (the runner passes
+ * `JSON.stringify(evidence)`); a string that already parses as JSON is stored verbatim (no double
+ * encode), a non-JSON string is encoded as a JSON string value so the CHECK never rejects it.
+ */
+function toJsonText(v: unknown, emptyFallback: string | null): string | null {
+  if (v === undefined || v === null) return emptyFallback;
+  if (typeof v === 'string') {
+    try {
+      JSON.parse(v);
+      return v; // already JSON text — store as-is
+    } catch {
+      return JSON.stringify(v); // a plain string value — wrap it
+    }
+  }
+  return JSON.stringify(v);
 }
 
 function hydrate(row: RunRow): Run {
@@ -214,13 +298,244 @@ function hydrateStep(row: StepRow): RunStep {
   };
 }
 
+// The whitelist of columns `patch` may touch. `state` is deliberately not here — attempting to set
+// it (or any unknown key) throws, forcing callers through `transition`.
+const PATCHABLE = new Set<string>([
+  'page_key', 'step_seq', 'cmd_seq', 'tab_epoch', 'park_kind', 'park_detail', 'error',
+  'evidence_kind', 'evidence_json', 'pending_questions_json', 'attempt', 'adapter_id',
+  'adapter_version',
+]);
+
+// The keys of a TransitionPatch that map straight to a column; JSON keys are handled specially.
+const TRANSITION_SCALAR = new Set<string>([
+  'page_key', 'cmd_seq', 'tab_epoch', 'park_kind', 'park_detail', 'error', 'evidence_kind',
+  'attempt', 'adapter_id', 'adapter_version',
+]);
+
 export function makeRunsDal(ctx: DalContext) {
   const stmt = makeStmtCache(ctx.db);
 
+  function getRaw(id: string): RunRow | undefined {
+    return stmt(`SELECT ${RUN_COLS} FROM apply_runs WHERE id = ?`).get(id) as RunRow | undefined;
+  }
+
+  function requireRaw(id: string): RunRow {
+    const row = getRaw(id);
+    if (!row) throw new Error(`apply_run not found: ${id}`);
+    return row;
+  }
+
   /** One run, JSON columns hydrated — the run-detail / transcript-header read. */
   function get(id: string): Run | null {
-    const row = stmt(`SELECT ${RUN_COLS} FROM apply_runs WHERE id = ?`).get(id) as RunRow | undefined;
+    const row = getRaw(id);
     return row ? hydrate(row) : null;
+  }
+
+  /** Enqueue a fresh run in state 'queued'. The scheduler/run-service leases what this creates. */
+  function enqueue(applicationId: string, input: EnqueueInput): Run {
+    const now = ctx.now();
+    const id = ctx.newId('run');
+    const row = {
+      id,
+      application_id: applicationId,
+      job_id: input.jobId,
+      profile_id: input.profileId,
+      source: input.source,
+      lane: input.lane,
+      adapter_id: input.adapterId ?? null,
+      adapter_version: input.adapterVersion ?? null,
+      state: 'queued',
+      mode: input.mode ?? 'auto',
+      queued_at: now,
+      updated_at: now,
+    };
+    const cols = Object.keys(row);
+    stmt(
+      `INSERT INTO apply_runs (${cols.join(', ')}) VALUES (${cols.map((c) => '@' + c).join(', ')})`,
+    ).run(row);
+    const run = hydrate(requireRaw(id));
+    ctx.emit(evt('insert', run));
+    return run;
+  }
+
+  /**
+   * THE guarded state writer. In ONE transaction: read current state, assert the transition is legal
+   * (throws otherwise), then write state + the caller's patch fields + all timestamp side-effects in a
+   * SINGLE UPDATE — so the row-level CHECK never observes a `submitted` row missing its evidence.
+   */
+  function transition(id: string, to: RunState, patch: TransitionPatch = {}): Run {
+    const tx = ctx.db.transaction((): Run => {
+      const cur = requireRaw(id);
+      const from = cur.state;
+      assertTransition(from, to); // throws on an illegal edge — the ONLY authority for the graph
+
+      const now = ctx.now();
+      const sets: string[] = ['state = @state', 'updated_at = @updated_at'];
+      const params: Record<string, unknown> = { id, state: to, updated_at: now };
+
+      // caller patch fields (scalars written verbatim; JSON serialized) — same UPDATE, so evidence
+      // lands atomically with state=submitted.
+      for (const key of Object.keys(patch) as Array<keyof TransitionPatch>) {
+        if (TRANSITION_SCALAR.has(key)) {
+          sets.push(`${key} = @${key}`);
+          params[key] = patch[key] ?? null;
+        } else if (key === 'evidence_json') {
+          sets.push('evidence_json = @evidence_json');
+          params.evidence_json = toJsonText(patch.evidence_json, null);
+        } else if (key === 'pending_questions_json') {
+          sets.push('pending_questions_json = @pending_questions_json');
+          params.pending_questions_json = toJsonText(patch.pending_questions_json, '[]');
+        }
+      }
+
+      // timestamp side-effects:
+      //  - started_at on FIRST entry into any slot-holding state (only if not already set)
+      if (isSlotHolding(to) && cur.started_at === null) {
+        sets.push('started_at = @started_at');
+        params.started_at = now;
+      }
+      //  - finished_at when entering a terminal state
+      if (isTerminal(to)) {
+        sets.push('finished_at = @finished_at');
+        params.finished_at = now;
+      }
+      //  - resume_count++ on the resume edge waiting_page -> classifying|queued
+      if (from === 'waiting_page' && (to === 'classifying' || to === 'queued')) {
+        sets.push('resume_count = resume_count + 1');
+      }
+
+      stmt(`UPDATE apply_runs SET ${sets.join(', ')} WHERE id = @id`).run(params);
+      return hydrate(requireRaw(id));
+    });
+    const run = tx();
+    ctx.emit(evt('update', run));
+    return run;
+  }
+
+  /**
+   * Record a verified submit: state=submitted + typed evidence + ONE apply_ledger row, all in ONE
+   * transaction. The ledger row is the per-account cap authority (Stage 3 reads submits, never slots);
+   * source/account are read from the run itself so the runner needn't supply them. `accountKey`
+   * defaults to 'default' (reserved for future multi-account).
+   */
+  function recordSubmitted(
+    id: string,
+    {
+      evidenceKind,
+      evidenceJson,
+      accountKey = 'default',
+    }: { evidenceKind: EvidenceKind; evidenceJson: unknown; accountKey?: string },
+  ): Run {
+    const write = ctx.db.transaction((): Run => {
+      const run = transition(id, 'submitted', {
+        evidence_kind: evidenceKind,
+        evidence_json: evidenceJson,
+      });
+      stmt(
+        'INSERT INTO apply_ledger (run_id, source, account_key, submitted_at) ' +
+          'VALUES (@run_id, @source, @account_key, @submitted_at)',
+      ).run({ run_id: run.id, source: run.source, account_key: accountKey, submitted_at: ctx.now() });
+      return run;
+    });
+    return write();
+  }
+
+  /**
+   * Non-state field writer. Setting `state` (or any non-whitelisted column) throws — callers MUST
+   * route state through `transition`. JSON columns are serialized; scalars bound verbatim.
+   */
+  function patch(id: string, fields: RunPatch & Record<string, unknown>): Run {
+    if ('state' in fields) {
+      throw new Error('runs.patch cannot set state; use runs.transition');
+    }
+    const sets: string[] = [];
+    const params: Record<string, unknown> = { id, updated_at: ctx.now() };
+    for (const key of Object.keys(fields)) {
+      if (!PATCHABLE.has(key)) {
+        throw new Error(`runs.patch: field not patchable: ${key}`);
+      }
+      if (key === 'evidence_json') {
+        sets.push('evidence_json = @evidence_json');
+        params.evidence_json = toJsonText(fields.evidence_json, null);
+      } else if (key === 'pending_questions_json') {
+        sets.push('pending_questions_json = @pending_questions_json');
+        params.pending_questions_json = toJsonText(fields.pending_questions_json, '[]');
+      } else {
+        sets.push(`${key} = @${key}`);
+        params[key] = fields[key] ?? null;
+      }
+    }
+    if (sets.length === 0) {
+      return hydrate(requireRaw(id));
+    }
+    sets.push('updated_at = @updated_at');
+    stmt(`UPDATE apply_runs SET ${sets.join(', ')} WHERE id = @id`).run(params);
+    const run = hydrate(requireRaw(id));
+    ctx.emit(evt('update', run));
+    return run;
+  }
+
+  /**
+   * Append a step. In ONE tx: read the run's step_seq, seq=step_seq+1, INSERT the step, and bump
+   * apply_runs.step_seq + steps_count. The 500-cap trigger silently drops seq>500 (RAISE(IGNORE)),
+   * so steps_count is bumped ONLY when the insert actually added a row (result.changes === 1).
+   */
+  function addStep(runId: string, input: AddStepInput): RunStep | null {
+    const tx = ctx.db.transaction((): RunStep | null => {
+      const cur = requireRaw(runId);
+      const seq = cur.step_seq + 1;
+      const now = ctx.now();
+      const res = stmt(
+        `INSERT INTO apply_run_steps (${STEP_COLS}) ` +
+          'VALUES (@run_id, @seq, @at, @phase, @action, @target, @detail, @snapshot_hash, @duration_ms, @ok)',
+      ).run({
+        run_id: runId,
+        seq,
+        at: now,
+        phase: input.phase,
+        action: input.action ?? null,
+        target: input.target ?? null,
+        detail: input.detail ?? null,
+        snapshot_hash: input.snapshotHash ?? null,
+        duration_ms: input.durationMs ?? null,
+        ok: (input.ok ?? true) ? 1 : 0,
+      });
+
+      // Always advance step_seq (the monotonic cursor) so a later un-capped write can't reuse a seq.
+      // Only bump steps_count when a row was truly inserted (trigger may have ignored an over-cap seq).
+      if (res.changes === 1) {
+        stmt(
+          'UPDATE apply_runs SET step_seq = @seq, steps_count = steps_count + 1, updated_at = @now WHERE id = @id',
+        ).run({ seq, now, id: runId });
+        return hydrateStep(
+          stmt(`SELECT ${STEP_COLS} FROM apply_run_steps WHERE run_id = ? AND seq = ?`).get(
+            runId,
+            seq,
+          ) as StepRow,
+        );
+      }
+      // Over-cap: advance the cursor only, no steps_count change, no row to return.
+      stmt('UPDATE apply_runs SET step_seq = @seq, updated_at = @now WHERE id = @id').run({
+        seq,
+        now,
+        id: runId,
+      });
+      return null;
+    });
+    const step = tx();
+    if (step) {
+      ctx.emit({ table: 'apply_run_steps', op: 'insert', id: `${runId}:${step.seq}`, patch: { ...step } });
+    }
+    return step;
+  }
+
+  /** Steps for a run, ordered by seq. Bounded by the 500-cap; default clamps to the whole ring. */
+  function getSteps(runId: string, { limit = 500 }: { limit?: number } = {}): RunStep[] {
+    const lim = clampLimit(limit, 500, 500);
+    const rows = stmt(
+      `SELECT ${STEP_COLS} FROM apply_run_steps WHERE run_id = ? ORDER BY seq ASC LIMIT ?`,
+    ).all(runId, lim) as StepRow[];
+    return rows.map(hydrateStep);
   }
 
   /** Lean page of runs (no evidence/pending blobs). Filters compose; total ignores limit/offset.
@@ -262,16 +577,6 @@ export function makeRunsDal(ctx: DalContext) {
     return { rows, total };
   }
 
-  /** Steps for a run, ordered by seq. Bounded by the schema's 500-cap trigger; default reads the
-   *  whole ring (hard max 500 — the cap is structural, not a courtesy). */
-  function getSteps(runId: string, { limit = 500 }: { limit?: number } = {}): RunStep[] {
-    const lim = clampLimit(limit, 500, 500);
-    const rows = stmt(
-      `SELECT ${STEP_COLS} FROM apply_run_steps WHERE run_id = ? ORDER BY seq ASC LIMIT ?`,
-    ).all(runId, lim) as StepRow[];
-    return rows.map(hydrateStep);
-  }
-
   /** Per-state counts within a trailing window (by queued_at), optionally scoped to one lane —
    *  the honest-rate panel's raw numbers. */
   function stats(input: StatsInput = {}): RunStats {
@@ -295,7 +600,80 @@ export function makeRunsDal(ctx: DalContext) {
     return { byState, total };
   }
 
-  return { get, listLean, getSteps, stats };
+  /** THE busy query: count of in-flight (slot-holding) runs in a lane. Drives scheduler pacing (Stage 3). */
+  function slotCount(lane: RunLane): number {
+    const row = stmt(
+      `SELECT COUNT(*) AS c FROM apply_runs WHERE lane = ? AND state IN (${SLOT_PLACEHOLDERS})`,
+    ).get(lane, ...SLOT_HOLDING) as { c: number };
+    return row.c;
+  }
+
+  /**
+   * Reclaim stranded `waiting_page` runs whose updated_at is older than the TTL: transition to
+   * `queued` if attempts remain (<3), else `failed`. Runs each transition through the guarded writer
+   * (both edges are legal from waiting_page). Returns the number reclaimed.
+   */
+  function reclaimStranded({ ttlMs }: { ttlMs: number }): number {
+    const cutoff = ctx.now() - ttlMs;
+    const ids = (
+      stmt(
+        "SELECT id FROM apply_runs WHERE state = 'waiting_page' AND updated_at < ?",
+      ).all(cutoff) as Array<{ id: string }>
+    ).map((r) => r.id);
+
+    let reclaimed = 0;
+    for (const id of ids) {
+      const cur = getRaw(id);
+      if (!cur || cur.state !== 'waiting_page') continue; // re-check (nothing else writes, but be safe)
+      const to: RunState = cur.attempt < 3 ? 'queued' : 'failed';
+      const p: TransitionPatch = to === 'failed' ? { error: 'waiting_page TTL exhausted' } : {};
+      transition(id, to, p);
+      reclaimed += 1;
+    }
+    return reclaimed;
+  }
+
+  return {
+    enqueue,
+    transition,
+    recordSubmitted,
+    patch,
+    addStep,
+    getSteps,
+    get,
+    listLean,
+    stats,
+    slotCount,
+    reclaimStranded,
+  };
+}
+
+/** Build the lean-row DomainEvent payload for a mutating write. */
+function evt(op: DomainEvent['op'], run: Run): DomainEvent {
+  return {
+    table: 'apply_runs',
+    op,
+    id: run.id,
+    patch: {
+      id: run.id,
+      application_id: run.application_id,
+      job_id: run.job_id,
+      profile_id: run.profile_id,
+      source: run.source,
+      lane: run.lane,
+      state: run.state,
+      mode: run.mode,
+      route: run.route,
+      attempt: run.attempt,
+      page_key: run.page_key,
+      park_kind: run.park_kind,
+      steps_count: run.steps_count,
+      queued_at: run.queued_at,
+      started_at: run.started_at,
+      finished_at: run.finished_at,
+      updated_at: run.updated_at,
+    },
+  };
 }
 
 export type RunsDal = ReturnType<typeof makeRunsDal>;

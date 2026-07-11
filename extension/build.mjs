@@ -3,18 +3,18 @@
 //   sw      -> dist/sw.js       (ESM — manifest declares background.type: "module")
 // and copies manifest.json + popup assets + icons beside the bundles. @jat13/shared is TS source
 // resolved via the workspace exports map, so it's bundled IN — the extension ships ZERO runtime deps.
+// src/protocol.ts (the extension's wire-contract types + CAPS) is imported by content/sensor/actuator
+// and type-only by sw, so esbuild folds it into each bundle — it is NOT a separate entry point.
 //
-// ── STAGE 0 MANIFEST NOTES (manifest.json cannot carry comments — they live here) ────────────────
-// • NO content_scripts registration yet. content.ts IS built to dist/content.js (so the bundle
-//   pipeline is proven from day one) but Chrome never injects it until Stage 2 wires the drive
-//   protocol. A built-but-unregistered script is inert by construction — the dormant-by-default
-//   contract starts at the manifest, not just in code.
-// • permissions are the Stage-0 minimum: tabs (popup "track this page" + open dashboard),
-//   storage (jat13Token/jat13Port pairing), alarms (the ONE reconnect watchdog), downloads
-//   (direct installer download). "scripting" and "webNavigation" return in Stage 2 with the
-//   content script + epoch-minting-on-committed-nav.
-// • host_permissions is loopback-only (http://127.0.0.1/*). The site host patterns
-//   (linkedin/indeed/greenhouse/lever/ashby) return in Stage 2 alongside content_scripts.
+// ── STAGE 2 MANIFEST NOTES (manifest.json cannot carry comments — they live here) ─────────────────
+// • content_scripts IS registered now (js: content.js, run_at document_idle, all_frames false) on the
+//   job hosts (linkedin/indeed/greenhouse/lever/ashby). Injection is broad ON PURPOSE and STILL SAFE:
+//   content.ts is DORMANT by default — it only connects its port + says hello, then waits for the SW
+//   to assign DRIVE/OBSERVE. A tab does nothing (no snapshots, no observer) until leased/observed.
+// • permissions add "scripting" + "webNavigation" (epoch-minting on committed navigation) on top of
+//   the Stage-0 set: tabs, storage (jat13Token/jat13Port pairing), alarms (the ONE reconnect
+//   watchdog), downloads (direct installer download).
+// • host_permissions add the job hosts alongside the loopback (http://127.0.0.1/*) the SW dials.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 import * as esbuild from 'esbuild';
 import { cpSync, mkdirSync, rmSync } from 'node:fs';
