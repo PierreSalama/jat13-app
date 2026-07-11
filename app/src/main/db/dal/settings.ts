@@ -15,6 +15,10 @@
 
 import type { DalContext } from './index.js';
 import { makeStmtCache } from './index.js';
+// Stage-3 sections (auto-apply engine dials + discovery controls) live in their own module (the old
+// tree's app/src/main/settings/ home, per this file's own "split it to schema.ts and re-export" note)
+// and merge in below. Merge is per-key against the registry, so adding them needs no migration.
+import { AUTO_APPLY_SECTION, DISCOVERY_SECTION } from '../../settings/schema.js';
 
 // ---- the registry (single source of truth for every user-tunable knob) ---------------------------
 
@@ -59,6 +63,10 @@ export const SETTINGS_REGISTRY = {
       description: 'Take an automatic daily database backup.',
     },
   },
+  // Stage 3 — the auto-apply engine dials + the discovery controls (defaults deliberately permissive;
+  // see settings/schema.ts). Registered here so dal.settings.get/set/all cover them with no migration.
+  autoApply: AUTO_APPLY_SECTION,
+  discovery: DISCOVERY_SECTION,
 } satisfies SettingsRegistry;
 
 /** Look up a spec, or undefined if the (section,key) pair is not registered. */

@@ -102,7 +102,7 @@ export default function render(view, ctx) {
       <div class="r-via">${esc(viaLabel(row.via))}</div>
       <div class="r-date tnum">${fmtAgo(row.updated_at)}</div>
     </div>`);
-    n.addEventListener('click', () => openDrawer(row, ctx));
+    n.addEventListener('click', () => openDrawer(row, ctx, () => list.reset()));
     if (!j) ensureJob(row.job_id, (job) => {
       const cell = $(`.r-title[data-jrow="${CSS.escape(row.job_id)}"]`, viewport);
       if (cell && job) cell.innerHTML = `<div class="t">${esc(job.title)}</div><div class="c">${esc(job.company || job.location || '')}</div>`;
@@ -157,10 +157,14 @@ export default function render(view, ctx) {
 
 // ---------------------------------------------------------------------------
 // detail drawer — meta + timeline + matched emails for one application.
-// Stage 2 adds the "Apply now" action: drive THIS Saved job through one supervised
-// run, then hop to Auto-Apply's live theater to watch it. POST /api/apply/one.
+// Stage 2 adds the "Apply now" action (drive THIS Saved job through one supervised
+// run → Auto-Apply's live theater; POST /api/apply/one). Stage 3 adds "Dismiss":
+// a PERMANENT block (POST /api/jobs/:id/dismiss) for a posting that isn't a real
+// job or that Pierre never wants back — it sets jobs.dismissed_at AND records the
+// dismissal keys, so it can never return on the next sighting (the 2026-07-10 scar).
+// onChanged (list.reset) re-fetches the table so the row vanishes.
 // ---------------------------------------------------------------------------
-async function openDrawer(row, ctx) {
+async function openDrawer(row, ctx, onChanged) {
   const j = jobKnown(row.job_id);
   const node = el(`<div class="drawer">
     <div class="drawer-h">
@@ -196,24 +200,41 @@ async function openDrawer(row, ctx) {
     <div class="dr-actions">
       ${row.status === 'tracked' ? `<button class="btn sm primary" id="dr-apply">${icon('bolt', 13)} Apply now</button>` : ''}
       ${job?.job_url ? `<a class="btn sm" href="${esc(job.job_url)}" target="_blank" rel="noreferrer">${icon('external', 13)} Open posting</a>` : ''}
+      ${row.job_id ? `<div class="spacer" style="flex:1"></div><button class="btn sm danger" id="dr-dismiss">${icon('trash', 13)} Dismiss</button>` : ''}
     </div>`;
   };
 
-  // wire the Apply-now action (idempotent — re-called after every body rebuild)
+  // wire the Apply-now + Dismiss actions (idempotent — re-called after every body rebuild)
   const wireApply = () => {
     const btn = $('#dr-apply', node);
-    if (!btn || btn.dataset.wired) return;
-    btn.dataset.wired = '1';
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      try {
-        const res = await api('/apply/one', { method: 'POST', body: { applicationId: row.id } });
-        const runId = res?.run?.id || res?.runId || res?.id || null;
-        close();
-        toast('Applying — opening the live theater', 'success', 3000);
-        ctx.go(runId ? `/auto-apply?run=${encodeURIComponent(runId)}` : `/auto-apply?apply=${encodeURIComponent(row.id)}`);
-      } catch (e) { btn.disabled = false; errToast(e, 'Apply'); }
-    });
+    if (btn && !btn.dataset.wired) {
+      btn.dataset.wired = '1';
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+          const res = await api('/apply/one', { method: 'POST', body: { applicationId: row.id } });
+          const runId = res?.run?.id || res?.runId || res?.id || null;
+          close();
+          toast('Applying — opening the live theater', 'success', 3000);
+          ctx.go(runId ? `/auto-apply?run=${encodeURIComponent(runId)}` : `/auto-apply?apply=${encodeURIComponent(row.id)}`);
+        } catch (e) { btn.disabled = false; errToast(e, 'Apply'); }
+      });
+    }
+    const dis = $('#dr-dismiss', node);
+    if (dis && !dis.dataset.wired) {
+      dis.dataset.wired = '1';
+      dis.addEventListener('click', async () => {
+        // short confirm — dismiss is PERMANENT (the posting can never come back on a later sighting).
+        if (!window.confirm('Dismiss this posting for good? It will be hidden here and can never come back on a future sighting.')) return;
+        dis.disabled = true;
+        try {
+          await api(`/jobs/${encodeURIComponent(row.job_id)}/dismiss`, { method: 'POST', body: { reason: 'user' } });
+          close();
+          toast('Dismissed — it won’t come back', 'success', 3200);
+          onChanged?.(); // re-fetch the table (server now filters jobs.dismissed_at) so the row vanishes
+        } catch (e) { dis.disabled = false; errToast(e, 'Dismiss'); }
+      });
+    }
   };
 
   try {

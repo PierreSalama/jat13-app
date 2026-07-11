@@ -377,11 +377,12 @@ describe('v11 → v13 importer', () => {
     // registered boolean: notifications.onApply landed with the v11 value
     expect(report.settings.imported).toContain('notifications.onApply');
     expect(get<{ value_json: string }>("SELECT value_json FROM settings WHERE section='notifications' AND key='onApply'").value_json).toBe('false');
-    // allow-mapped but unregistered (Stage-3 keys) → skipped, NOT written
+    // autoApply.keywords is a REGISTERED Stage-3 key now → it LANDS (was skipped pre-Stage-3).
+    expect(report.settings.imported).toContain('autoApply.keywords');
+    expect(get<{ value_json: string }>("SELECT value_json FROM settings WHERE section='autoApply' AND key='keywords'").value_json).toContain('engineer');
+    // appearance.theme is STILL unregistered (the registry key is themeId, not theme) → skipped, not written
     const skippedKeys = report.settings.skipped.map((s) => s.key);
-    expect(skippedKeys).toContain('autoApply.keywords');
     expect(skippedKeys).toContain('appearance.theme');
-    expect(get("SELECT 1 FROM settings WHERE section='autoApply'")).toBeUndefined();
     expect(get("SELECT 1 FROM settings WHERE section='appearance'")).toBeUndefined();
     // secret-shaped key inside an allowed section → dropped
     expect(report.settings.skipped).toContainEqual({ key: 'notifications.webhookToken', reason: 'secret_shaped' });

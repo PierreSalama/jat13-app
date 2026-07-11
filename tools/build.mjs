@@ -9,7 +9,7 @@
 // ABI must NEVER end up inside a bundle). Only our own source + the @jat13/shared TS package is
 // bundled. The list is derived from app/package.json so a new dep can't silently get inlined.
 import * as esbuild from 'esbuild';
-import { cpSync, mkdirSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, rmSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -51,6 +51,14 @@ function copyAssets() {
   // resourceDir('adapters/builtin') (main.ts), mirroring the migrations resolution. Ship them beside
   // the bundle so `npm run dev` resolves them; electron-builder's extraResources ships them packaged.
   cpSync(join(APP, 'src/main/adapters/builtin'), join(OUT, 'main/adapters/builtin'), { recursive: true });
+  // Discovery runtime assets (Stage 3): the jobspy subprocess script + the ATS seed-company list are
+  // NOT bundled (esbuild can't inline a .py, and the seed is loaded from disk). The generic driver /
+  // discovery service resolve them via resourceDir('discovery') (main.ts), mirroring migrations/adapters.
+  // Copy ONLY .py + .json — the .ts modules in this dir ARE bundled into main.js.
+  cpSync(join(APP, 'src/main/discovery'), join(OUT, 'main/discovery'), {
+    recursive: true,
+    filter: (src) => statSync(src).isDirectory() || /\.(py|json)$/.test(src),
+  });
   mkdirSync(join(OUT, 'renderer'), { recursive: true });
   cpSync(join(APP, 'src/renderer/index.html'), join(OUT, 'renderer/index.html'));
   cpSync(join(APP, 'src/renderer/styles.css'), join(OUT, 'renderer/styles.css'));

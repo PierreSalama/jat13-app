@@ -18,6 +18,18 @@ import { ensureJob, jobKnown, primeJob } from './applications.js';
 
 const loadingRow = (t = 'Loading…') => `<div class="loading-row"><span class="spinner"></span>${esc(t)}</div>`;
 const RENDER_CAP = 30; // the queue is small by design; cap the DOM and show "N more"
+const STALE_MS = 20 * 60 * 1000; // a wall waiting this long is stale — surface a skip so it stops clogging
+
+// Hygiene ordering (engine-knowledge §8): real questions FIRST (answer → learn → requeue), reviews
+// next (usually already submitted), walls LAST (you clear them in the browser or skip them). A stale
+// wall sinks to the very bottom. Keeps the "needs-you pile clogs the run" scar from recurring.
+function hygieneRank(r) {
+  if (r.state === 'ready_for_review') return 2;
+  const qs = r.questions || r.pending_questions || [];
+  if (qs.length > 0 || r.park_kind === 'needs_answer') return 0; // answerable question
+  const stale = r.updated_at && Date.now() - r.updated_at > STALE_MS;
+  return stale ? 4 : 3; // wall / generic (stale walls last)
+}
 
 /** Normalize a pending question (string OR object) to one shape the form understands. */
 function normQ(q) {
@@ -63,7 +75,7 @@ export default function render(view, ctx) {
       if (!listBox.querySelector('.need-item')) listBox.innerHTML = `<div class="empty">Could not read the queue — ${esc(e?.message || 'unknown error')}. Retrying…</div>`;
       return;
     }
-    const all = [...human, ...review];
+    const all = [...human, ...review].sort((a, b) => hygieneRank(a) - hygieneRank(b));
     all.forEach((r) => { if (r.job_id && (r.job_title || r.title)) primeJob(r.job_id, { title: r.job_title || r.title, company: r.company || '' }); });
     countBadge.textContent = all.length ? String(all.length) : '';
 
@@ -110,10 +122,12 @@ function buildItem(run, refresh, ctx) {
     </div>
   </div>`);
 
+  const stale = !!(run.updated_at && Date.now() - run.updated_at > STALE_MS);
+  const onDone = () => { item.remove(); refresh(); };
   if (answerable) item.appendChild(buildAnswerForm(run, questions, refresh));
   else if (isReview) item.appendChild(reviewHint(run));
-  else if (wall) item.appendChild(wallHint(run));
-  else item.appendChild(genericHint(run));
+  else if (wall) { if (stale) item.style.opacity = '0.72'; item.appendChild(wallHint(run, onDone, stale)); }
+  else item.appendChild(genericHint(run, onDone));
 
   // resolve the job once (title + the "open the tab" link both need it); patch in place on arrival.
   if (run.job_id && !jobKnown(run.job_id)) {
@@ -222,27 +236,43 @@ function openPostingBtn(run) {
   return `<a class="btn sm need-open-slot" href="${esc(url)}" target="_blank" rel="noreferrer">${icon('external', 13)} Open the tab</a>`;
 }
 
-function wallHint(run) {
+/** the "Skip" affordance for a wall the engine can't clear (needs_human → parked). Clears it from the
+ *  queue so the pile stops clogging the run (the §8 hygiene habit, made one-click). */
+function skipBtn(run, onDone) {
+  const b = el(`<button class="btn sm need-skip">${icon('close', 12)} Skip</button>`);
+  b.addEventListener('click', async () => {
+    b.disabled = true;
+    try { await api(`/runs/${encodeURIComponent(run.id)}/dismiss`, { method: 'POST' }); toast('Skipped — cleared from your queue', 'info', 2600); onDone?.(); }
+    catch (e) { b.disabled = false; errToast(e, 'Skip'); }
+  });
+  return b;
+}
+
+function wallHint(run, onDone, stale) {
   const kind = parkLabel(run.park_kind);
   const why = run.park_kind === 'resume_required'
     ? 'This form needs a résumé attached that the engine could not supply.'
-    : `This is a ${esc(kind.toLowerCase())} — it can only be cleared by you, in the browser. The engine will never auto-solve it.`;
-  return el(`<div class="need-hint wall">
-    <div class="need-hint-b">${why}</div>
-    <div class="need-hint-a">${run.park_kind === 'resume_required' ? `<a class="btn sm" href="#/documents">${icon('doc', 13)} Documents</a>` : ''}${openPostingBtn(run)}</div>
+    : `This is a ${esc(kind.toLowerCase())} — only you can clear it, in the browser. The engine never auto-solves walls.`;
+  const node = el(`<div class="need-hint wall">
+    <div class="need-hint-b">${why}${stale ? ' <span class="ember">It has been waiting a while — skip it or clear it in the browser so it stops clogging the queue.</span>' : ''}</div>
+    <div class="need-hint-a">${run.park_kind === 'resume_required' ? `<a class="btn sm" href="#/documents">${icon('doc', 13)} Documents</a>` : ''}${openPostingBtn(run)}<span class="need-skip-slot"></span></div>
   </div>`);
+  node.querySelector('.need-skip-slot').replaceWith(skipBtn(run, onDone));
+  return node;
 }
 
 function reviewHint(run) {
   return el(`<div class="need-hint">
-    <div class="need-hint-b">Quarantined for review — this usually means it was already submitted but the engine could not prove it with trustworthy evidence. Check the posting; if it's done, no action is needed.</div>
+    <div class="need-hint-b">Usually already submitted — quarantined only because the engine could not prove it with trustworthy evidence. Check the posting; if it's done, no action is needed.</div>
     <div class="need-hint-a">${openPostingBtn(run)}</div>
   </div>`);
 }
 
-function genericHint(run) {
-  return el(`<div class="need-hint">
+function genericHint(run, onDone) {
+  const node = el(`<div class="need-hint">
     <div class="need-hint-b">${esc(run.park_detail || humanize(run.park_kind || 'needs attention'))} — resolve it in the browser, then it can resume.</div>
-    <div class="need-hint-a">${openPostingBtn(run)}</div>
+    <div class="need-hint-a">${openPostingBtn(run)}<span class="need-skip-slot"></span></div>
   </div>`);
+  node.querySelector('.need-skip-slot').replaceWith(skipBtn(run, onDone));
+  return node;
 }

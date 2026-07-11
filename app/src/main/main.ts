@@ -24,7 +24,14 @@ import { mountLearnApi } from './learn/index.js';
 import { makeLearnDistiller } from './learn/distiller.js';
 import { loadBuiltins, makeRegistry, type Registry } from './adapters/registry.js';
 import { WsGateway } from './engine/ws-gateway.js';
-import { makeRunService, type ApplyRunService } from './engine/run-service.js';
+import { makeRunService, type RunService, type FitPort } from './engine/run-service.js';
+import { makeFitService } from './engine/fit.js';
+import { makeDismissalsDal, type DismissReason } from './db/dal/dismissals.js';
+import { makeDiscoveryDal } from './db/dal/discovery.js';
+import { makeIngest } from './discovery/ingest.js';
+import { makeDiscoveryService } from './discovery/service.js';
+import { mountTrackRoutes } from './server/routes-track.js';
+import { mountAutoRoutes } from './server/routes-auto.js';
 import { snapshotV11, planImport, executeImport } from './importer/v11.js';
 import { migrateGmailCredentials } from './importer/gmail-creds.js';
 import type { Server as HttpServer } from 'node:http';
@@ -93,13 +100,71 @@ async function boot(): Promise<void> {
     ? makeDevDrive({ getWindow: () => mainWindow, log: (m) => console.log(`[devdrive] ${m}`) })
     : undefined;
 
-  // Stage 2 apply spine: the adapter registry, the /drive gateway (attached to the loopback server
-  // below), and the single-apply run-service. The run-service depends only on the RunGateway interface,
-  // so the survival test proves the whole drive headlessly with a FakeExtension.
+  // Stage 2-3 apply engine: adapter registry, the /drive gateway (attached below), deterministic fit,
+  // the supervised run-service (scheduler + single-apply), discovery supply, and the permanent-dismiss
+  // DAL. The run-service depends only on the RunGateway interface, so the survival + scheduler tests
+  // prove the whole drive headlessly with a FakeExtension.
   const registry: Registry = makeRegistry(loadBuiltins(resourceDir('adapters/builtin')));
   const gateway = new WsGateway({ token, log: (m) => console.log(`[gateway] ${m}`) });
-  const runService: ApplyRunService = makeRunService({ dal, gateway, registry, log: (m) => console.log(`[run] ${m}`) });
+  const fitService = makeFitService({ dal, settings: dal.settings });
+  // adapt FitService (scoreFor→FitResult) to the scheduler's FitPort (scoreFor→number|null).
+  const fit: FitPort = { scoreFor: (jobId, profileId) => fitService.scoreFor(jobId, profileId).score ?? null, floor: () => fitService.floor() };
+  const runService: RunService = makeRunService({ dal, gateway, registry, fit, log: (m) => console.log(`[run] ${m}`) });
   const learnDistiller = makeLearnDistiller({ dal });
+
+  // Stage 3 discovery + permanent dismiss (Pierre's false-tracking scar): the ingest chokepoint gates
+  // every source AND /track (is-this-a-job + dismiss-check); discovery starts at boot (self-gated on
+  // settings.discovery.enabled), the apply loop only on /apply/start (supervised).
+  const dismissalsDal = makeDismissalsDal(dal.ctx);
+  const discoveryDal = makeDiscoveryDal(dal.ctx);
+  const ingest = makeIngest({ dal, discoveryDal, registry, dismissals: dismissalsDal });
+  const discovery = makeDiscoveryService({
+    dal, discoveryDal, registry, ingest, spacingMs: 1500,
+    discoveryDir: resourceDir('discovery'),
+    log: (m) => console.log(`[discovery] ${m}`),
+  });
+
+  // Boundary adapters — the scheduler/discovery services and the routes-auto DTOs were designed by
+  // different builders; these map the real outputs to exactly the shapes the mission-control renderer
+  // reads (lanes as an ARRAY with its lane name; discovery status as {enabled, sources}; null→undefined).
+  const autoRunSvc = {
+    start: () => runService.start(),
+    stop: () => runService.stop(),
+    queue: () => runService.queue(),
+    state: () => {
+      const s = runService.state();
+      const lanes = (['linkedin', 'indeed', 'ats'] as const).map((lane) => {
+        const l = s.lanes[lane];
+        return { lane, queued: l.queued, inflight: l.inflight, submittedToday: l.submittedToday, cap: l.capRemaining, capRemaining: l.capRemaining, breaker: l.breaker.reason, pausedUntil: null };
+      });
+      return { running: s.running, activeRun: s.activeRun, lanes };
+    },
+  };
+  const discoverySvc = {
+    runOnce: () => discovery.runOnce(),
+    status: () => {
+      const st = discovery.status();
+      return {
+        enabled: st.running,
+        sources: st.lanes.map((l) => ({
+          id: l.source_id, board: l.board, kind: l.kind, enabled: l.enabled,
+          lastTickAt: l.last_tick_at, yield: l.accepted_24h, found: l.found_24h,
+          freshnessHours: null, saturation: null,
+          breaker: l.breaker_reason, cooldownUntil: l.cooldown_until, nextEarliestAt: l.next_earliest_at,
+        })),
+      };
+    },
+  };
+  const dismissForRoute = {
+    dismiss: (jobId: string, opts: { reason?: string; note?: string | null }) => {
+      // the route already validated `reason` against the dismissals CHECK vocab; build conditionally
+      // (exactOptionalPropertyTypes forbids assigning an explicit `undefined` to an optional prop).
+      const o: { reason?: DismissReason; note?: string } = {};
+      if (opts.reason !== undefined) o.reason = opts.reason as DismissReason;
+      if (opts.note != null) o.note = opts.note;
+      return dismissalsDal.dismiss(jobId, o);
+    },
+  };
 
   // The importer seam: routes never import engine modules directly. plan/execute snapshot the source
   // themselves (copy-based — v11 can be LIVE at :7744), so `snapshots:true` skips the liveness refusal.
@@ -138,6 +203,9 @@ async function boot(): Promise<void> {
           mountDataRoutes(api, { ...dataDeps, db: opened.db, startedAt, token, version: app.getVersion(), devtools: DEVTOOLS, frontWindow: frontOrCreate });
           mountApplyRoutes(api, { dal, runService });
           mountLearnApi(api, dal, learnDistiller);
+          // Stage 3: supervised auto-apply controls + discovery status, and /track + permanent dismiss.
+          mountAutoRoutes(api, { dal: { settings: dal.settings, runs: dal.runs, dismissals: dismissForRoute }, runService: autoRunSvc, discovery: discoverySvc });
+          mountTrackRoutes(api, { dal: { dismissals: dismissalsDal }, ingest: (input) => ingest.track(input), isJobPosting: ingest.jobGate });
           devDrive?.mount(api);
         },
       }),
@@ -145,6 +213,7 @@ async function boot(): Promise<void> {
 
   // the /drive WebSocket rides the SAME loopback server (token-guarded upgrade on IDENTITY.wsPath).
   gateway.attach(server.server as unknown as HttpServer);
+  discovery.start(); // supply the apply queue; self-gates on settings.discovery.enabled + per-source pacing
 
   // Tray = the reason the brain survives a closed window (extension stays paired, browser dashboard
   // stays reachable). Skipped in SMOKE: a headless CI boot has no shell tray to attach to.

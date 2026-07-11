@@ -26,11 +26,11 @@ function fixtureDir(extraFiles: Record<string, string> = {}): string {
 const NOOP_002 = '-- test fixture\nCREATE TABLE backup_probe (x INTEGER) STRICT;\n';
 
 describe('discoverMigrations', () => {
-  it('the real migrations dir contains exactly 001_init', () => {
+  it('the real migrations dir is a contiguous chain starting at 001_init', () => {
     const migs = discoverMigrations();
-    expect(migs.map((m) => ({ version: m.version, name: m.name }))).toEqual([
-      { version: 1, name: 'init' },
-    ]);
+    expect(migs.length).toBeGreaterThanOrEqual(2); // 001_init + 002 dismiss (grows over stages)
+    expect(migs[0]).toMatchObject({ version: 1, name: 'init' });
+    migs.forEach((m, i) => expect(m.version).toBe(i + 1)); // contiguous 1..N
   });
 
   it('THROWS on a .sql filename outside the convention (trap #7: old runner silently skipped it)', () => {
@@ -56,16 +56,17 @@ describe('discoverMigrations', () => {
 });
 
 describe('runMigrations', () => {
-  it('applies 001 to a fresh db: user_version, ledger row, every v1 table present', () => {
+  it('applies the whole chain to a fresh db: user_version, ledger rows, every table present', () => {
+    const N = discoverMigrations().length; // 001..N (count-agnostic — survives new migrations)
     const { db, migration } = openDatabase({ file: ':memory:' });
     expect(migration.from).toBe(0);
-    expect(migration.to).toBe(1);
-    expect(migration.applied).toHaveLength(1);
-    expect(migration.backups).toEqual([]); // fresh db — nothing worth backing up
+    expect(migration.to).toBe(N);
+    expect(migration.applied).toHaveLength(N);
+    expect(migration.backups).toEqual([]); // fresh db — decided once, nothing worth backing up
 
-    expect(db.pragma('user_version', { simple: true })).toBe(1);
-    const ledger = db.prepare('SELECT version, name FROM schema_migrations').all();
-    expect(ledger).toEqual([{ version: 1, name: 'init' }]);
+    expect(db.pragma('user_version', { simple: true })).toBe(N);
+    const ledger = db.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as { version: number }[];
+    expect(ledger.map((r) => r.version)).toEqual(Array.from({ length: N }, (_, i) => i + 1));
 
     const tables = new Set(
       (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map(
@@ -78,7 +79,7 @@ describe('runMigrations', () => {
       'apply_ledger', 'learned_answers', 'documents', 'document_blobs', 'document_text',
       'email_accounts', 'emails', 'email_matches', 'events',
       'discovery_sources', 'company_tokens', 'discovery_batches', 'job_sightings',
-      'fit_scores', 'autopsies', 'interviews', 'ai_calls',
+      'fit_scores', 'autopsies', 'interviews', 'ai_calls', 'dismissals',
       'settings', 'secrets', 'import_runs', 'schema_migrations',
     ]) {
       expect(tables, `missing table: ${t}`).toContain(t);
@@ -87,9 +88,10 @@ describe('runMigrations', () => {
   });
 
   it('is idempotent: a second run applies nothing', () => {
+    const N = discoverMigrations().length;
     const { db } = openDatabase({ file: ':memory:' });
     const second = runMigrations(db);
-    expect(second.from).toBe(1);
+    expect(second.from).toBe(N);
     expect(second.applied).toEqual([]);
     expect(second.backups).toEqual([]);
     db.close();
@@ -107,8 +109,8 @@ describe('runMigrations', () => {
     const dir = mkdtempSync(join(tmpdir(), 'jat13-db-'));
     const file = join(dir, 'jat13.db');
 
-    // boot 1: fresh install at v1 — no backups
-    const first = openDatabase({ file });
+    // boot 1: fresh install at v1 (a 001-only dir, so the fixture 002 below is genuinely new) — no backups
+    const first = openDatabase({ file, migrationsDir: fixtureDir() });
     expect(first.migration.backups).toEqual([]);
     first.db.close();
 
@@ -134,7 +136,7 @@ describe('runMigrations', () => {
   it('skips the backup for :memory: (nothing on disk to copy)', () => {
     const db = new Database(':memory:');
     applyPragmas(db);
-    runMigrations(db); // to v1 — db now HAS content, so only the memory guard skips the backup
+    runMigrations(db, fixtureDir()); // to v1 (001-only dir) — db now HAS content; only the memory guard skips the backup
     const migDir = fixtureDir({ '002_backup-probe.sql': NOOP_002 });
     const result = runMigrations(db, migDir);
     expect(result.applied.map((a) => a.version)).toEqual([2]);
@@ -143,7 +145,7 @@ describe('runMigrations', () => {
   });
 
   it('a failing migration rolls back whole: no ledger row, user_version unchanged', () => {
-    const { db } = openDatabase({ file: ':memory:' });
+    const { db } = openDatabase({ file: ':memory:', migrationsDir: fixtureDir() }); // establish v1 (001-only)
     const migDir = fixtureDir({
       '002_broken.sql': 'CREATE TABLE ok_table (x INTEGER) STRICT;\nTHIS IS NOT SQL;\n',
     });

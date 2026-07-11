@@ -92,6 +92,47 @@ export const SRC_TAG = { linkedin: 'in', indeed: 'id', lever: 'lv', greenhouse: 
 export const srcTagText = (source) => { const s = String(source || '').toLowerCase(); return SRC_TAG[s] || s.slice(0, 2) || '·'; };
 
 // ---------------------------------------------------------------------------
+// Stage-3 mission control — discovery sources, queue skip reasons, engine dials
+// (labels for the Auto-Apply queue/discovery strip + the Settings config cards).
+// ---------------------------------------------------------------------------
+// discovery boards (discovery_sources.board) + kinds (discovery_sources.kind)
+export const BOARD_LABEL = { linkedin: 'LinkedIn', indeed: 'Indeed', greenhouse: 'Greenhouse', lever: 'Lever', ashby: 'Ashby' };
+export const boardLabel = (b) => BOARD_LABEL[b] || humanize(b);
+export const DISCOVERY_KIND_LABEL = { jobspy: 'JobSpy', extension_scrape: 'Browser scrape', ats_board: 'ATS board' };
+export const discoveryKindLabel = (k) => DISCOVERY_KIND_LABEL[k] || humanize(k);
+
+// why a job did NOT enter the apply queue (skip-floor / cap / adapter / saturation gate).
+// Every skip is shown with its reason (locked-decision 6) — never a silent drop.
+export const SKIP_REASON_LABEL = {
+  below_fit_floor: 'Below fit floor', over_cap: 'Lane at cap', no_adapter: 'Unsupported site',
+  saturated: 'Source saturated', already_applied: 'Already applied', dismissed: 'Dismissed',
+  needs_you: 'Waiting on you', rate_limited: 'Rate limited', off_target: 'Off target', other: 'Held back',
+};
+export const skipReasonLabel = (r) => SKIP_REASON_LABEL[r] || humanize(r);
+
+// a lane/source breaker string → a short human phrase (null/'' = healthy). Free text falls through.
+export const BREAKER_LABEL = {
+  rate_limited: 'Rate limited', cloudflare: 'Cloudflare', consecutive_failures: 'Too many failures',
+  cooldown: 'Cooling down', paused: 'Paused', cap: 'At cap',
+};
+export const breakerLabel = (b) => (b ? (BREAKER_LABEL[b] || humanize(b)) : '');
+
+// permanent-dismiss reasons (dismissals.reason CHECK, migration 002)
+export const DISMISS_REASON_LABEL = {
+  user: 'You dismissed it', not_a_job: 'Not a job posting', spam: 'Spam',
+  irrelevant: 'Irrelevant', off_target: 'Off target',
+};
+export const dismissReasonLabel = (r) => DISMISS_REASON_LABEL[r] || humanize(r);
+
+// Settings › Auto-apply dials — seniority ceiling + work modes (settings/schema.ts).
+export const SENIORITY_LABEL = { entry: 'Entry', mid: 'Mid', senior: 'Senior', lead: 'Lead', any: 'Any level' };
+export const SENIORITY_ORDER = ['entry', 'mid', 'senior', 'lead', 'any'];
+export const seniorityLabel = (s) => SENIORITY_LABEL[s] || humanize(s);
+export const WORK_MODE_LABEL = { remote: 'Remote', hybrid: 'Hybrid', onsite: 'On-site' };
+export const WORK_MODE_ORDER = ['remote', 'hybrid', 'onsite'];
+export const workModeLabel = (m) => WORK_MODE_LABEL[m] || humanize(m);
+
+// ---------------------------------------------------------------------------
 // inbox email categories (ordered classifier output → short human chips)
 // ---------------------------------------------------------------------------
 export const MAIL_CAT_LABEL = {

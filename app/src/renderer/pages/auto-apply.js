@@ -1,22 +1,27 @@
-// Auto-Apply — mission control, Stage-2 subset (01-ARCHITECTURE §5, Operate).
-// Stage 2 = ONE apply end-to-end: pick a Saved job (or arrive from Applications
-// via ?run=/?apply=), then WATCH the live run theater drive it — a per-run step
-// transcript (/api/runs/:id/steps, polled ~1.5s), a "what the robot sees" readout
-// (page class + current control), and a RUN_STATE progress bar. History lists the
-// recent finished runs. The fit-ordered queue + discovery strip + honest-rate
-// panel + caps arrive with the scheduler (Stage 3) — left as a labeled placeholder.
+// Auto-Apply — mission control (01-ARCHITECTURE §5, Operate). Stage 3 goes LIVE: start/stop full
+// SUPERVISED auto-apply (the lane scheduler + pump), then watch it work —
+//   · the live run theater (per-run transcript + "what the robot sees"), kept from Stage 2
+//   · caps + pacing rings per lane vs the rolling-24h ledger cap
+//   · the fit-ordered QUEUE with the skip-floor decisions shown (each skip carries its reason)
+//   · the HONEST-RATE panel — per-lane submitted / parked / failed / skipped, with WHY
+//   · the DISCOVERY STRIP — per-source yield / freshness / saturation / breaker
+// Everything polls together every ~1.5s and dies on route change (ctx.poll / ctx.signal).
 //
-// Contract (integrator wires these into main.ts / routes-apply.ts):
-//   POST /api/apply/one { applicationId }  → ok({ run }|{ runId }) — starts ONE run
-//   POST /api/apply/stop { runId }         → ok({...})            — cancels the in-flight run
-//   GET  /api/runs?limit=N                 → ok({ rows, total })  — lean run rows (READ dal)
-//   GET  /api/runs/:id/steps               → ok({ steps })        — the step transcript
+// Contract (integrator wires these — see server/routes-auto.ts):
+//   POST /api/auto/start | /api/auto/stop     → ok(AutoState)  — supervised scheduler on/off
+//   GET  /api/auto/state                       → ok({ running, lanes:[…], activeRun? })
+//   GET  /api/auto/queue                       → ok({ upcoming:[…], skipped:[…] })
+//   GET  /api/discovery/status                 → ok({ enabled, sources:[…] })
+//   POST /api/discovery/run                    → ok({ started:true }) — kick one sweep
+//   POST /api/apply/one { applicationId }       → ok({ runId }) — drive ONE chosen job (Stage-2 spine)
+//   GET  /api/runs?limit=N · /api/runs/:id/steps→ the theater + history
 import { el, $, esc, icon, num, fmtAgo, fmtTime, pageHead, toast, errToast, openOverlay } from '../lib/dom.js';
 import { api } from '../lib/api.js';
 import {
   humanize, runStateLabel, runStatePct, runStateDot, LIVE_RUN_STATES, TERMINAL_RUN_STATES,
   parkLabel, laneLabel, srcTagText, statusLabel, stepPhaseLabel, stepPhaseDot,
 } from '../lib/vocab.js';
+import { capsPanel, queuePanel, honestRatePanel, discoveryStrip } from '../lib/auto-panels.js';
 import { ensureJob, jobKnown, primeJob } from './applications.js';
 
 const loadingRow = (t = 'Loading…') => `<div class="loading-row"><span class="spinner"></span>${esc(t)}</div>`;
@@ -33,16 +38,18 @@ export default function render(view, ctx) {
   let focusRunId = ctx.query.run || null; // arrived from an Applications "Apply now"
   const focusApplId = ctx.query.apply || null;
   let starting = !!(focusRunId || focusApplId); // optimistic "launching…" until the row appears
-  let busy = false; // guards the Apply/Stop buttons
+  let busy = false; // guards the start/stop/apply buttons
+  let running = false;
 
   const pad = el(`<div class="view-pad">
     ${pageHead('Auto-Apply', { sub: ctx.meta.sub })}
     <div class="card aa-control">
-      <button class="btn primary" id="aa-apply">${icon('bolt', 14)} Apply to a job</button>
-      <button class="btn danger hidden" id="aa-stop">${icon('close', 13)} Stop run</button>
+      <button class="btn primary" id="aa-start">${icon('play', 13)} Start auto-apply</button>
+      <button class="btn danger hidden" id="aa-stop-auto">${icon('pause', 13)} Stop auto-apply</button>
       <span class="pill off" id="aa-pill">Idle</span>
       <div class="spacer" style="flex:1"></div>
-      <span class="aa-note">Stage 2 · single supervised apply — the queue &amp; caps go live in Stage 3</span>
+      <button class="btn sm" id="aa-apply-one">${icon('bolt', 13)} Apply to one</button>
+      <button class="btn sm" id="aa-disco-run">${icon('refresh', 13)} Discover now</button>
       <button class="btn sm" id="aa-config">${icon('settings', 13)} Configure</button>
     </div>
     <div class="grid">
@@ -51,16 +58,23 @@ export default function render(view, ctx) {
         <div id="aa-theater">${loadingRow('Reading the engine…')}</div>
       </div>
       <div class="card col-flex span-4 hoverable">
-        <div class="card-h"><span class="cap">Queue &amp; discovery</span><div class="spacer"></div><span class="aside">Stage 3</span></div>
-        <div class="aa-placeholder">
-          <div class="aa-ph-mark">${icon('layers', 92)}</div>
-          <p>The fit-ordered queue, the skip floor with reasons, and the per-source discovery strip arrive with the scheduler in <b>Stage 3</b>. For now, apply to one job at a time.</p>
-          <button class="btn sm block" id="aa-needs">${icon('bell', 13)} Open Needs You</button>
-        </div>
+        <div class="card-h"><span class="cap">Caps &amp; pacing</span><div class="spacer"></div><span class="aside">vs 45/24h ledger</span></div>
+        <div id="aa-caps">${loadingRow('')}</div>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="card col-flex span-5 hoverable">
+        <div class="card-h"><span class="cap">Queue</span><div class="spacer"></div><span class="aside">fit-ordered · skip floor shown</span></div>
+        <div id="aa-queue">${loadingRow('')}</div>
+      </div>
+      <div class="card col-flex span-7 hoverable">
+        <div class="card-h"><span class="cap">Honest rate &amp; discovery</span><div class="spacer"></div><span class="aside" id="aa-disco-aside">per lane · per source</span></div>
+        <div id="aa-rate">${loadingRow('')}</div>
+        <div id="aa-disco" style="margin-top:10px"></div>
       </div>
     </div>
     <div class="card col-flex hoverable">
-      <div class="card-h"><span class="cap">History</span><div class="spacer"></div><span class="aside" id="aa-hist-aside">recent finished runs</span></div>
+      <div class="card-h"><span class="cap">History</span><div class="spacer"></div><span class="aside">recent finished runs</span></div>
       <div id="aa-history">${loadingRow('')}</div>
     </div>
   </div>`);
@@ -68,65 +82,83 @@ export default function render(view, ctx) {
 
   const theater = $('#aa-theater', pad);
   const history = $('#aa-history', pad);
+  const caps = $('#aa-caps', pad);
+  const queueBox = $('#aa-queue', pad);
+  const rateBox = $('#aa-rate', pad);
+  const discoBox = $('#aa-disco', pad);
   const pill = $('#aa-pill', pad);
-  const stopBtn = $('#aa-stop', pad);
+  const startBtn = $('#aa-start', pad);
+  const stopBtn = $('#aa-stop-auto', pad);
 
   $('#aa-config', pad).addEventListener('click', () => ctx.go('/settings'));
-  $('#aa-needs', pad).addEventListener('click', () => ctx.go('/needs-you'));
-  $('#aa-apply', pad).addEventListener('click', () => openPicker(ctx, (runId) => { focusRunId = runId; starting = true; refresh(); }));
-  stopBtn.addEventListener('click', async () => {
-    const runId = stopBtn.getAttribute('data-run'); if (!runId || busy) return;
-    busy = true;
-    try { await api('/apply/stop', { method: 'POST', body: { runId } }); toast('Stopping the run…', 'info', 2500); }
-    catch (e) { errToast(e, 'Stop'); }
-    finally { busy = false; refresh(); }
+  $('#aa-apply-one', pad).addEventListener('click', () => openPicker(ctx, (runId) => { focusRunId = runId; starting = true; refresh(); }));
+  startBtn.addEventListener('click', () => toggleAuto(true));
+  stopBtn.addEventListener('click', () => toggleAuto(false));
+  $('#aa-disco-run', pad).addEventListener('click', async () => {
+    try { await api('/discovery/run', { method: 'POST' }); toast('Discovery sweep started — new supply lands in the queue', 'success', 3000); }
+    catch (e) { errToast(e, 'Discover'); }
   });
 
-  function setControl(active) {
-    const live = active && !TERMINAL_RUN_STATES.has(active.state);
-    pill.className = 'pill ' + (live ? 'on' : 'off');
-    pill.innerHTML = live
-      ? `<span class="dot live"></span>${esc(runStateLabel(active.state))}`
-      : (starting ? '<span class="dot live"></span>Launching…' : 'Idle');
-    const stoppable = live && active.state !== 'needs_human';
-    stopBtn.classList.toggle('hidden', !stoppable);
-    if (stoppable) stopBtn.setAttribute('data-run', active.id);
+  async function toggleAuto(on) {
+    if (busy) return;
+    busy = true;
+    try {
+      await api(on ? '/auto/start' : '/auto/stop', { method: 'POST' });
+      toast(on ? 'Auto-apply started — supervised, capped, and paced' : 'Auto-apply stopping — in-flight runs finish first', on ? 'success' : 'info', 3200);
+    } catch (e) { errToast(e, on ? 'Start' : 'Stop'); }
+    finally { busy = false; refresh(); }
+  }
+
+  function setControl(state) {
+    running = !!state?.running;
+    pill.className = 'pill ' + (running ? 'on' : 'off');
+    pill.innerHTML = running ? '<span class="dot live"></span>Running' : (starting ? '<span class="dot live"></span>Launching…' : 'Idle');
+    startBtn.classList.toggle('hidden', running);
+    stopBtn.classList.toggle('hidden', !running);
   }
 
   async function refresh() {
-    let rows;
-    try {
-      const d = await api('/runs?limit=40', { signal: ctx.signal });
-      rows = d?.rows || [];
-    } catch (e) {
-      if (e?.aborted) return;
-      theater.innerHTML = `<div class="empty">Could not reach the engine — ${esc(e?.message || 'unknown error')}. Retrying…</div>`;
+    // one poll cycle: state + queue + discovery (the mission-control triad) + runs (theater/history).
+    const [stateR, queueR, discoR, runsR] = await Promise.allSettled([
+      api('/auto/state', { signal: ctx.signal }),
+      api('/auto/queue', { signal: ctx.signal }),
+      api('/discovery/status', { signal: ctx.signal }),
+      api('/runs?limit=40', { signal: ctx.signal }),
+    ]);
+    if (ctx.signal.aborted) return;
+
+    if (stateR.status === 'fulfilled') { setControl(stateR.value); caps.innerHTML = capsPanel(stateR.value); rateBox.innerHTML = honestRatePanel(stateR.value); }
+    else if (!caps.querySelector(':not(.loading-row)')) caps.innerHTML = `<div class="empty">Engine unreachable — retrying…</div>`;
+    if (queueR.status === 'fulfilled') queueBox.innerHTML = queuePanel(queueR.value);
+    if (discoR.status === 'fulfilled') discoBox.innerHTML = discoveryStrip(discoR.value);
+
+    if (runsR.status !== 'fulfilled') {
+      if (runsR.reason?.aborted) return;
+      theater.innerHTML = `<div class="empty">Could not reach the engine — ${esc(runsR.reason?.message || 'unknown error')}. Retrying…</div>`;
       return;
     }
+    const rows = runsR.value?.rows || [];
     rows.forEach((r) => { if (r.job_id && r.job_title) primeJob(r.job_id, { title: r.job_title, company: r.company || '' }); });
 
-    // a genuinely-live run always wins the theater; otherwise fall back to the run we just
-    // launched (even after it finishes, so you see its result) — then idle.
+    // a genuinely-live run wins the theater; else the run we just launched (even after it finishes).
     let active = rows.find((r) => LIVE_RUN_STATES.has(r.state)) || null;
     if (!active && focusRunId) active = rows.find((r) => r.id === focusRunId) || null;
     if (!active && focusApplId) active = rows.find((r) => r.application_id === focusApplId) || null;
     if (active) { if (LIVE_RUN_STATES.has(active.state)) focusRunId = active.id; starting = false; }
 
-    setControl(active);
     paintHistory(history, rows.filter((r) => TERMINAL_RUN_STATES.has(r.state)).slice(0, 50));
 
     if (!active) {
       theater.innerHTML = starting
         ? theaterFrame(null, [], 'launching')
-        : `<div class="empty">No run in flight. Press <b>Apply to a job</b> to drive one — you'll watch every step here.</div>`;
+        : `<div class="empty">No run in flight. Press <b>Start auto-apply</b> for a supervised run, or <b>Apply to one</b> to drive a single job — every step shows here.</div>`;
       return;
     }
-    // one dependent fetch per tick — the active run's transcript
     let steps = [];
     try {
       const s = await api(`/runs/${encodeURIComponent(active.id)}/steps`, { signal: ctx.signal });
       steps = s?.steps || [];
-    } catch (e) { if (e?.aborted) return; /* keep the header; trail just stays empty */ }
+    } catch (e) { if (e?.aborted) return; /* keep the header; trail stays empty */ }
     theater.innerHTML = theaterFrame(active, steps);
     if (active.job_id && !jobKnown(active.job_id)) {
       ensureJob(active.job_id, () => { const t = $('#aa-run-title', theater); if (t) t.innerHTML = jobLabel(active.job_id); });
@@ -217,7 +249,7 @@ function paintHistory(box, rows) {
 }
 
 // ---------------------------------------------------------------------------
-// job picker — choose a Saved application to drive (POST /api/apply/one)
+// job picker — choose a Saved application to drive ONE apply (POST /api/apply/one)
 // ---------------------------------------------------------------------------
 function openPicker(ctx, onStarted) {
   const node = el(`<div class="picker aa-picker">

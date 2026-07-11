@@ -75,11 +75,16 @@ describe('settings: per-key merge over the registry', () => {
   it('all() returns every registered section with stored-or-default per key', () => {
     const { dal } = freshDal();
     dal.settings.set('maintenance', 'backupDaily', false);
-    expect(dal.settings.all()).toEqual({
+    const all = dal.settings.all();
+    // the base sections merge stored-over-default per key...
+    expect(all).toMatchObject({
       appearance: { themeId: 'atelier' },
       notifications: { onApply: true },
       maintenance: { backupDaily: false },
     });
+    // ...and the Stage-3 engine sections are present too (count-agnostic — grows over stages).
+    expect(all).toHaveProperty('autoApply');
+    expect(all).toHaveProperty('discovery');
   });
 
   it('set() emits a DomainEvent carrying the accepted value', () => {
